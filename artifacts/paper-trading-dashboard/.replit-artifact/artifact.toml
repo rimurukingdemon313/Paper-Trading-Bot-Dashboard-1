@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Paper Trading Bot Dashboard"
+description = "A mobile-friendly paper-trading dashboard for monitoring a $1,000 virtual account, simulated performance metrics, and bot status without any broker connections or real trade execution."
+version = "1.0.0"
+id = "artifacts/paper-trading-dashboard"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20126
+
+[services.development]
+run = "pnpm --filter @workspace/paper-trading-dashboard run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/paper-trading-dashboard", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/paper-trading-dashboard/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20126"
+BASE_PATH = "/"
