@@ -29,7 +29,7 @@ import {
 type BotState = 'running' | 'paused';
 type EngineState = 'running' | 'paused';
 type TradeSide = 'LONG' | 'SHORT';
-type TradeResult = 'WIN' | 'LOSS';
+type TradeResult = 'WIN' | 'LOSS' | 'OPEN' | 'REJECTED';
 
 type Trade = {
   id: string;
@@ -53,29 +53,91 @@ type AccountModel = {
   peak: number;
 };
 
-const startingAccount: AccountModel = {
-  balance: 1084.62,
-  dailyPnl: 16.84,
-  monthlyPnl: 84.62,
-  trades: 47,
-  wins: 29,
-  losses: 18,
-  drawdown: 2.8,
-  peak: 1096.2,
+type AiDecision = {
+  decision: 'BUY' | 'SELL' | 'NO TRADE';
+  confidence: number;
+  reasoning: string;
+  entryPrice: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  riskRewardRatio: number | null;
+  riskAmount: number | null;
 };
 
-const startingTrades: Trade[] = [
-  { id: 't-01', time: '09:42:18', symbol: 'EURUSD', side: 'LONG', setup: 'London sweep', result: 'WIN', pnl: 12.48, confidence: 82 },
-  { id: 't-02', time: '09:15:04', symbol: 'GBPJPY', side: 'SHORT', setup: 'Order block', result: 'WIN', pnl: 8.16, confidence: 76 },
-  { id: 't-03', time: '08:51:37', symbol: 'XAUUSD', side: 'LONG', setup: 'FVG reclaim', result: 'LOSS', pnl: -5.92, confidence: 64 },
-  { id: 't-04', time: '08:20:11', symbol: 'NAS100', side: 'SHORT', setup: 'Liquidity grab', result: 'WIN', pnl: 17.04, confidence: 88 },
-  { id: 't-05', time: '07:58:49', symbol: 'USDJPY', side: 'LONG', setup: 'Breaker block', result: 'WIN', pnl: 6.72, confidence: 71 },
-];
+type RiskDecision = {
+  approved: boolean;
+  state: 'BUY' | 'SELL' | 'NO TRADE';
+  reasons: string[];
+  rules: {
+    account_balance?: number;
+    risk_per_trade?: number;
+    risk_amount?: number;
+    max_open_positions?: number;
+    max_daily_loss?: number;
+    min_risk_reward?: number;
+  };
+};
 
-const startingTrend = [1000, 1008, 1005, 1018, 1024, 1019, 1033, 1030, 1046, 1052, 1048, 1060, 1068, 1063, 1077, 1085, 1081, 1096, 1089, 1101, 1092, 1084.62];
+type PaperTrade = {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  status: 'OPEN';
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  riskAmount: number;
+};
+
+type SmcSnapshot = {
+  overallContext?: { direction?: string; score?: number };
+  liquiditySweeps?: unknown[];
+  structureBreaks?: unknown[];
+  fairValueGaps?: unknown[];
+  orderBlocks?: unknown[];
+};
+
+const startingAccount: AccountModel = {
+  balance: 1000,
+  dailyPnl: 0,
+  monthlyPnl: 0,
+  trades: 0,
+  wins: 0,
+  losses: 0,
+  drawdown: 0,
+  peak: 1000,
+};
+
+const startingTrades: Trade[] = [];
+
+const startingTrend = [1000, 1000, 1000, 1000, 1000, 1000];
+const initialAiDecision: AiDecision = {
+  decision: 'NO TRADE',
+  confidence: 0,
+  reasoning: 'Run Gemini analysis to evaluate the latest M15 SMC evidence.',
+  entryPrice: null,
+  stopLoss: null,
+  takeProfit: null,
+  riskRewardRatio: null,
+  riskAmount: null,
+};
+const initialRiskDecision: RiskDecision = {
+  approved: false,
+  state: 'NO TRADE',
+  reasons: ['Risk review pending'],
+  rules: {
+    account_balance: 1000,
+    risk_per_trade: 0.005,
+    risk_amount: 5,
+    max_open_positions: 1,
+    max_daily_loss: 20,
+    min_risk_reward: 2,
+  },
+};
 
 const formatMoney = (value: number) => `${value < 0 ? '-' : ''}$${Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const formatPct = (value: number) => `${value.toFixed(1)}%`;
+const formatSignedMoney = (value: number) => `${value >= 0 ? '+' : ''}${formatMoney(value)}`;
 
 function StatusDot({ color = 'bg-[#c8ed45]' }: { color?: string }) {
   return <span className={`pulse-dot inline-block h-2 w-2 rounded-full ${color}`} aria-hidden="true" />;
@@ -186,6 +248,8 @@ function TrendChart({ values }: { values: number[] }) {
 
 function ActivityRow({ trade }: { trade: Trade }) {
   const isWin = trade.result === 'WIN';
+  const isOpen = trade.result === 'OPEN';
+  const isRejected = trade.result === 'REJECTED';
   return (
     <div className="grid grid-cols-[72px_1fr_68px_76px] items-center gap-2 border-b border-border/60 py-3 last:border-0 sm:grid-cols-[82px_1fr_100px_82px_82px] sm:gap-3" data-testid={`row-trade-${trade.id}`}>
       <div className="mono text-[10px] text-muted-foreground">{trade.time}</div>
@@ -197,8 +261,8 @@ function ActivityRow({ trade }: { trade: Trade }) {
         <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{trade.setup}</div>
       </div>
       <div className="hidden text-[11px] text-muted-foreground sm:block">{trade.confidence}% <span className="text-[9px]">AI</span></div>
-      <div className={`mono text-right text-[11px] font-medium ${isWin ? 'text-[#177b69]' : 'text-[#c84e3d]'}`}>{isWin ? '+' : ''}{formatMoney(trade.pnl)}</div>
-      <div className={`hidden justify-self-end rounded-full border px-2 py-1 mono text-[8px] uppercase tracking-[.08em] sm:block ${isWin ? 'border-[#177b69]/25 bg-[#177b69]/7 text-[#177b69]' : 'border-[#c84e3d]/25 bg-[#c84e3d]/7 text-[#c84e3d]'}`}>{trade.result}</div>
+      <div className={`mono text-right text-[11px] font-medium ${isWin ? 'text-[#177b69]' : isOpen ? 'text-muted-foreground' : 'text-[#c84e3d]'}`}>{isWin ? '+' : ''}{formatMoney(trade.pnl)}</div>
+      <div className={`hidden justify-self-end rounded-full border px-2 py-1 mono text-[8px] uppercase tracking-[.08em] sm:block ${isWin ? 'border-[#177b69]/25 bg-[#177b69]/7 text-[#177b69]' : isOpen ? 'border-border bg-muted text-muted-foreground' : isRejected ? 'border-[#c84e3d]/25 bg-[#c84e3d]/7 text-[#c84e3d]' : 'border-[#c84e3d]/25 bg-[#c84e3d]/7 text-[#c84e3d]'}`}>{trade.result}</div>
     </div>
   );
 }
@@ -209,9 +273,14 @@ export default function Dashboard() {
   const [account, setAccount] = useState<AccountModel>(startingAccount);
   const [trades, setTrades] = useState<Trade[]>(startingTrades);
   const [trend, setTrend] = useState(startingTrend);
+  const [aiDecision, setAiDecision] = useState<AiDecision>(initialAiDecision);
+  const [riskDecision, setRiskDecision] = useState<RiskDecision>(initialRiskDecision);
+  const [openTrade, setOpenTrade] = useState<PaperTrade | null>(null);
+  const [smcSnapshot, setSmcSnapshot] = useState<SmcSnapshot | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showReset, setShowReset] = useState(false);
   const [notice, setNotice] = useState('System nominal');
-  const winRate = useMemo(() => (account.wins / account.trades) * 100, [account.trades, account.wins]);
+  const winRate = useMemo(() => account.trades ? (account.wins / account.trades) * 100 : 0, [account.trades, account.wins]);
 
   const toggleBot = () => {
     setBotState((current) => {
@@ -230,27 +299,96 @@ export default function Dashboard() {
   };
 
   const resetAccount = () => {
-    setAccount({ balance: 1000, dailyPnl: 0, monthlyPnl: 0, trades: 0, wins: 0, losses: 0, drawdown: 0, peak: 1000 });
+    setAccount(startingAccount);
     setTrades([]);
-    setTrend([1000, 1000, 1000, 1000, 1000, 1000]);
+    setTrend(startingTrend);
+    setAiDecision(initialAiDecision);
+    setRiskDecision(initialRiskDecision);
+    setOpenTrade(null);
+    setSmcSnapshot(null);
     setBotState('paused');
     setNotice('Paper account reset to $1,000');
     setShowReset(false);
   };
 
-  const refreshPulse = () => {
+  const runAiDecision = async () => {
     if (botState === 'paused') {
-      setNotice('Resume the bot to advance the simulation');
+      setNotice('Resume the bot before requesting an AI decision');
       return;
     }
     if (smcState === 'paused') {
-      setNotice('Resume M15 SMC analysis to advance the simulation');
+      setNotice('Resume M15 SMC analysis before requesting an AI decision');
       return;
     }
-    const nextBalance = Number((account.balance + 2.46).toFixed(2));
-    setAccount((current) => ({ ...current, balance: nextBalance, dailyPnl: Number((current.dailyPnl + 2.46).toFixed(2)), monthlyPnl: Number((current.monthlyPnl + 2.46).toFixed(2)), trades: current.trades + 1, wins: current.wins + 1, peak: Math.max(current.peak, nextBalance) }));
-    setTrend((current) => [...current.slice(-21), nextBalance]);
-    setNotice('Simulation tick recorded');
+    setIsAnalyzing(true);
+    setNotice('Running M15 SMC analysis and Gemini review…');
+    try {
+      const response = await fetch('/api/trading/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          account: {
+            balance: account.balance,
+            dailyPnl: account.dailyPnl,
+            openPositions: openTrade ? 1 : 0,
+          },
+          smcEnabled: true,
+        }),
+      });
+      const payload = await response.json() as {
+        aiDecision?: AiDecision;
+        risk?: RiskDecision;
+        paperTrade?: PaperTrade | null;
+        smc?: SmcSnapshot;
+      };
+      const latestAiDecision = payload.aiDecision;
+      if (payload.aiDecision) setAiDecision(payload.aiDecision);
+      if (payload.risk) setRiskDecision(payload.risk);
+      if (payload.smc) setSmcSnapshot(payload.smc);
+
+      if (!response.ok || !payload.risk) {
+        setNotice(payload.risk?.reasons?.[0] ?? 'No trade: analysis service unavailable');
+        return;
+      }
+
+      if (payload.paperTrade && payload.risk.approved && latestAiDecision) {
+        const paperTrade = payload.paperTrade;
+        const activity: Trade = {
+          id: paperTrade.id,
+          time: new Date().toLocaleTimeString('en-GB', { hour12: false }),
+          symbol: paperTrade.symbol,
+          side: paperTrade.side === 'BUY' ? 'LONG' : 'SHORT',
+          setup: `Gemini ${paperTrade.side} · RR 1:${latestAiDecision.riskRewardRatio ?? '—'}`,
+          result: 'OPEN',
+          pnl: 0,
+          confidence: latestAiDecision.confidence,
+        };
+        setOpenTrade(paperTrade);
+        setAccount((current) => ({ ...current, trades: current.trades + 1 }));
+        setTrades((current) => [activity, ...current].slice(0, 20));
+        setNotice(`Approved ${paperTrade.side}: paper trade logged at $5 risk`);
+      } else {
+        const reason = payload.risk.reasons[0] ?? 'Risk Engine rejected the proposal';
+        const activity: Trade = {
+          id: `rejected-${Date.now()}`,
+          time: new Date().toLocaleTimeString('en-GB', { hour12: false }),
+          symbol: 'EURUSD',
+          side: latestAiDecision?.decision === 'SELL' ? 'SHORT' : 'LONG',
+          setup: `Risk rejected: ${reason}`,
+          result: 'REJECTED',
+          pnl: 0,
+          confidence: latestAiDecision?.confidence ?? 0,
+        };
+        setTrades((current) => [activity, ...current].slice(0, 20));
+        setNotice(`NO TRADE — ${reason}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to reach analysis service';
+      setRiskDecision({ ...initialRiskDecision, reasons: [`No trade: ${message}`] });
+      setNotice(`NO TRADE — ${message}`);
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   return (
@@ -311,13 +449,14 @@ export default function Dashboard() {
             </section>
 
             <section className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-              <MetricCard label="Daily P/L" value={`+${formatMoney(account.dailyPnl)}`} detail="vs. prior close" tone="positive" icon={ArrowUpRight} testId="daily-pnl" />
-              <MetricCard label="Monthly P/L" value={`+${formatMoney(account.monthlyPnl)}`} detail="May 01 – May 22" tone="positive" icon={TrendingUp} testId="monthly-pnl" />
+               <MetricCard label="Daily P/L" value={formatSignedMoney(account.dailyPnl)} detail="max loss $20.00" tone={account.dailyPnl < 0 ? 'negative' : 'positive'} icon={ArrowUpRight} testId="daily-pnl" />
+               <MetricCard label="Monthly P/L" value={formatSignedMoney(account.monthlyPnl)} detail="paper account" tone={account.monthlyPnl < 0 ? 'negative' : 'positive'} icon={TrendingUp} testId="monthly-pnl" />
               <MetricCard label="Trades" value={String(account.trades)} detail="all simulated" icon={Activity} testId="trades" />
               <MetricCard label="Wins" value={String(account.wins)} detail={`${formatPct(winRate)} of trades`} tone="positive" icon={Target} testId="wins" />
               <MetricCard label="Losses" value={String(account.losses)} detail="risk contained" tone="negative" icon={ArrowDownRight} testId="losses" />
               <MetricCard label="Win rate" value={formatPct(winRate)} detail="target ≥ 55.0%" tone="positive" icon={Sparkles} testId="win-rate" />
               <MetricCard label="Drawdown" value={formatPct(account.drawdown)} detail="from account peak" tone="neutral" icon={BarChart3} testId="drawdown" />
+               <MetricCard label="Open trade" value={openTrade ? '1' : '0'} detail="max 1 permitted" tone={openTrade ? 'positive' : 'neutral'} icon={WalletCards} testId="open-trades" />
               <MetricCard label="Bot status" value={botState === 'running' ? 'Running' : 'Paused'} detail={botState === 'running' ? 'learning in sandbox' : 'no new decisions'} tone={botState === 'running' ? 'positive' : 'neutral'} icon={Bot} testId="bot-status" />
             </section>
 
@@ -335,12 +474,20 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between"><div className="flex items-center gap-2"><Bot size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Bot console</h2></div><span className={`flex items-center gap-1.5 rounded-full px-2 py-1 mono text-[9px] uppercase tracking-[.08em] ${botState === 'running' ? 'bg-[#177b69]/10 text-[#177b69]' : 'bg-muted text-muted-foreground'}`} data-testid="status-bot"><StatusDot color={botState === 'running' ? 'bg-[#177b69]' : 'bg-muted-foreground'} />{botState}</span></div>
                 <div className="mt-5 rounded-lg bg-primary p-4 text-primary-foreground">
                   <div className="flex items-center gap-2 text-[10px] text-primary-foreground/55"><span className="h-1.5 w-1.5 rounded-full bg-accent" /> DECISION LOOP</div>
-                  <div className="mt-2 flex items-end justify-between gap-3"><span className="display text-[22px] font-semibold">Monitoring market structure</span><span className="mono text-[10px] text-accent">82% conf.</span></div>
-                  <div className="mt-4 h-1 rounded-full bg-primary-foreground/10"><div className="h-1 w-[82%] rounded-full bg-accent" /></div>
-                  <div className="mt-2 flex justify-between mono text-[9px] text-primary-foreground/45"><span>EURUSD · M15</span><span>next scan 00:18</span></div>
+                   <div className="mt-2 flex items-end justify-between gap-3"><span className="display text-[22px] font-semibold" data-testid="text-ai-decision">{aiDecision.decision}</span><span className="mono text-[10px] text-accent" data-testid="text-gemini-confidence">{aiDecision.confidence}% conf.</span></div>
+                   <div className="mt-4 h-1 rounded-full bg-primary-foreground/10"><div className="h-1 rounded-full bg-accent transition-all" style={{ width: `${aiDecision.confidence}%` }} /></div>
+                   <div className="mt-2 flex justify-between mono text-[9px] text-primary-foreground/45"><span>GEMINI AI · EURUSD · M15</span><span>{smcSnapshot?.overallContext?.direction ? `SMC ${smcSnapshot.overallContext.direction}` : 'SMC ready'}</span></div>
                 </div>
-                 <div className="mt-4 space-y-3">
-                  {[['Strategy', 'SMC v2.4'], ['Risk per trade', '0.50%'], ['Max open risk', '1.50%'], ['Last decision', '09:42:18']].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border/60 pb-2.5 text-[11px] last:border-0 last:pb-0"><span className="text-muted-foreground">{label}</span><span className="mono text-[10px] font-medium">{value}</span></div>)}
+                  <div className="mt-4 rounded-lg border border-border bg-background/45 p-3" data-testid="panel-ai-reasoning">
+                    <div className="mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">Trade reasons</div>
+                    <p className="mt-1.5 text-[11px] leading-5 text-foreground/80">{aiDecision.reasoning}</p>
+                  </div>
+                  <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2.5 text-[10px] ${riskDecision.approved ? 'bg-[#177b69]/7 text-[#177b69]' : 'bg-[#c84e3d]/7 text-[#c84e3d]'}`} data-testid="status-risk-engine">
+                    <ShieldCheck size={14} className="mt-0.5 shrink-0" />
+                    <span><strong>{riskDecision.approved ? 'Risk Engine approved' : 'Risk Engine: NO TRADE'}</strong><br />{riskDecision.reasons[0]}</span>
+                  </div>
+                  <div className="mt-4 space-y-3">
+                   {[['Strategy', 'SMC v2.4 + Gemini'], ['Risk per trade', '$5.00 exactly'], ['Max open positions', '1'], ['Daily loss limit', '$20.00'], ['Minimum RR', '1:2']].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border/60 pb-2.5 text-[11px] last:border-0 last:pb-0"><span className="text-muted-foreground">{label}</span><span className="mono text-[10px] font-medium">{value}</span></div>)}
                 </div>
                  <div className="mt-5 flex items-center justify-between rounded-lg border border-border bg-background/45 px-3 py-2.5" data-testid="status-smc-engine">
                    <div className="flex items-center gap-2">
@@ -354,9 +501,9 @@ export default function Dashboard() {
                      {smcState === 'running' ? 'On' : 'Off'}
                    </button>
                  </div>
-                <div className="mt-5 flex gap-2">
+                 <div className="mt-5 flex gap-2">
                   <button type="button" onClick={toggleBot} data-testid="button-toggle-bot" className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2.5 text-[11px] font-semibold text-primary-foreground transition hover:opacity-90 active:scale-[.98]">{botState === 'running' ? <Pause size={14} /> : <Play size={14} />}{botState === 'running' ? 'Pause bot' : 'Resume bot'}</button>
-                  <button type="button" onClick={refreshPulse} data-testid="button-simulate-tick" className="flex h-10 w-10 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:border-primary/40 hover:text-primary" aria-label="Record simulation tick"><RotateCcw size={14} /></button>
+                   <button type="button" onClick={() => void runAiDecision()} disabled={isAnalyzing} data-testid="button-run-ai" className="flex items-center justify-center gap-2 rounded-lg border border-border px-3 py-2.5 text-[10px] font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-primary disabled:cursor-wait disabled:opacity-60" aria-label="Run Gemini AI decision"><Sparkles size={14} />{isAnalyzing ? 'Analyzing…' : 'Run AI'}</button>
                 </div>
               </div>
             </section>
@@ -367,14 +514,14 @@ export default function Dashboard() {
                 <div className="mt-5 grid grid-cols-[72px_1fr_68px_76px] gap-2 border-b border-border pb-2 mono text-[9px] uppercase tracking-[.1em] text-muted-foreground sm:grid-cols-[82px_1fr_100px_82px_82px] sm:gap-3"><span>Time</span><span>Instrument / setup</span><span className="hidden sm:block">Confidence</span><span className="text-right">P/L</span><span className="hidden text-right sm:block">Result</span></div>
                 <div>{trades.length ? trades.map((trade) => <ActivityRow key={trade.id} trade={trade} />) : <div className="flex flex-col items-center justify-center py-10 text-center"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground"><Activity size={17} /></div><div className="mt-3 text-[12px] font-semibold">No activity yet</div><div className="mt-1 text-[10px] text-muted-foreground">Resume the bot when you are ready to run the simulation.</div></div>}</div>
               </div>
-              <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-5">
-                <div className="flex items-center gap-2"><WalletCards size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Current position</h2></div>
-                <div className="mt-4 rounded-lg border border-border bg-background/60 p-4">
-                  <div className="flex items-center justify-between"><div><div className="text-[17px] font-semibold">EURUSD</div><div className="mt-1 flex items-center gap-2 mono text-[9px] text-muted-foreground"><span className="rounded bg-[#177b69]/10 px-1.5 py-0.5 text-[#177b69]">LONG</span> M15 · SMC</div></div><div className="text-right"><div className="mono text-[15px] font-medium text-[#177b69]">+$12.48</div><div className="mt-1 text-[9px] text-muted-foreground">unrealized</div></div></div>
-                  <div className="mt-5 grid grid-cols-3 gap-3 border-t border-border pt-3"><div><div className="mono text-[9px] text-muted-foreground">Entry</div><div className="mt-1 mono text-[10px]">1.0842</div></div><div><div className="mono text-[9px] text-muted-foreground">Stop</div><div className="mt-1 mono text-[10px]">1.0818</div></div><div><div className="mono text-[9px] text-muted-foreground">Size</div><div className="mt-1 mono text-[10px]">0.04 lot</div></div></div>
-                </div>
-                <div className="mt-4 flex items-center gap-2 rounded-lg bg-[#177b69]/7 px-3 py-2.5 text-[10px] text-[#177b69]"><ShieldCheck size={14} /><span>Within risk limits · 0.50% at risk</span></div>
-                <button type="button" onClick={() => setNotice('Position management is simulation-only')} data-testid="button-position-details" className="mt-4 flex w-full items-center justify-center gap-1 rounded-lg border border-border py-2.5 text-[10px] font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground">Position details <ArrowUpRight size={13} /></button>
+               <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-5">
+                 <div className="flex items-center justify-between"><div className="flex items-center gap-2"><WalletCards size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Current position</h2></div><span className={`rounded-full px-2 py-1 mono text-[9px] uppercase tracking-[.08em] ${openTrade ? 'bg-[#177b69]/10 text-[#177b69]' : 'bg-muted text-muted-foreground'}`}>{openTrade ? 'OPEN' : 'FLAT'}</span></div>
+                 {openTrade ? <div className="mt-4 rounded-lg border border-border bg-background/60 p-4">
+                   <div className="flex items-center justify-between"><div><div className="text-[17px] font-semibold">{openTrade.symbol}</div><div className="mt-1 flex items-center gap-2 mono text-[9px] text-muted-foreground"><span className={`rounded px-1.5 py-0.5 ${openTrade.side === 'BUY' ? 'bg-[#177b69]/10 text-[#177b69]' : 'bg-[#c84e3d]/10 text-[#c84e3d]'}`}>{openTrade.side}</span> M15 · Gemini + SMC</div></div><div className="text-right"><div className="mono text-[15px] font-medium text-muted-foreground">$0.00</div><div className="mt-1 text-[9px] text-muted-foreground">unrealized</div></div></div>
+                   <div className="mt-5 grid grid-cols-3 gap-3 border-t border-border pt-3"><div><div className="mono text-[9px] text-muted-foreground">Entry</div><div className="mt-1 mono text-[10px]">{openTrade.entryPrice}</div></div><div><div className="mono text-[9px] text-muted-foreground">Stop</div><div className="mt-1 mono text-[10px]">{openTrade.stopLoss}</div></div><div><div className="mono text-[9px] text-muted-foreground">Target</div><div className="mt-1 mono text-[10px]">{openTrade.takeProfit}</div></div></div>
+                 </div> : <div className="mt-4 flex min-h-[130px] flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 p-4 text-center"><WalletCards size={20} className="text-muted-foreground/60" /><div className="mt-3 text-[12px] font-semibold">No active paper trade</div><div className="mt-1 text-[10px] leading-4 text-muted-foreground">Gemini proposals are opened only after the Risk Engine approves them.</div></div>}
+                 <div className={`mt-4 flex items-center gap-2 rounded-lg px-3 py-2.5 text-[10px] ${openTrade ? 'bg-[#177b69]/7 text-[#177b69]' : 'bg-muted text-muted-foreground'}`}><ShieldCheck size={14} /><span>{openTrade ? 'Within risk limits · $5.00 at risk' : 'Flat · ready for one approved trade'}</span></div>
+                 <button type="button" onClick={() => setNotice(openTrade ? 'Position management is simulation-only' : 'No open paper trade')} data-testid="button-position-details" className="mt-4 flex w-full items-center justify-center gap-1 rounded-lg border border-border py-2.5 text-[10px] font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground">Position details <ArrowUpRight size={13} /></button>
               </div>
             </section>
 

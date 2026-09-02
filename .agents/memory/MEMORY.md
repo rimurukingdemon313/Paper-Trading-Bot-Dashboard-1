@@ -1,0 +1,1 @@
+- [Gemini model availability](gemini-model-availability.md) — verify the live Gemini model when provider errors recommend a replacement.
