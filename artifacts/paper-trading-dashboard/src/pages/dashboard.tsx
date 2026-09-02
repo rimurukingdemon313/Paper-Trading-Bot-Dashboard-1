@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 
 type BotState = 'running' | 'paused';
+type EngineState = 'running' | 'paused';
 type TradeSide = 'LONG' | 'SHORT';
 type TradeResult = 'WIN' | 'LOSS';
 
@@ -204,6 +205,7 @@ function ActivityRow({ trade }: { trade: Trade }) {
 
 export default function Dashboard() {
   const [botState, setBotState] = useState<BotState>('running');
+  const [smcState, setSmcState] = useState<EngineState>('running');
   const [account, setAccount] = useState<AccountModel>(startingAccount);
   const [trades, setTrades] = useState<Trade[]>(startingTrades);
   const [trend, setTrend] = useState(startingTrend);
@@ -215,6 +217,14 @@ export default function Dashboard() {
     setBotState((current) => {
       const next = current === 'running' ? 'paused' : 'running';
       setNotice(next === 'running' ? 'Simulation resumed' : 'Simulation paused safely');
+      return next;
+    });
+  };
+
+  const toggleSmc = () => {
+    setSmcState((current) => {
+      const next = current === 'running' ? 'paused' : 'running';
+      setNotice(next === 'running' ? 'M15 SMC analysis resumed' : 'M15 SMC analysis paused safely');
       return next;
     });
   };
@@ -231,6 +241,10 @@ export default function Dashboard() {
   const refreshPulse = () => {
     if (botState === 'paused') {
       setNotice('Resume the bot to advance the simulation');
+      return;
+    }
+    if (smcState === 'paused') {
+      setNotice('Resume M15 SMC analysis to advance the simulation');
       return;
     }
     const nextBalance = Number((account.balance + 2.46).toFixed(2));
@@ -325,9 +339,21 @@ export default function Dashboard() {
                   <div className="mt-4 h-1 rounded-full bg-primary-foreground/10"><div className="h-1 w-[82%] rounded-full bg-accent" /></div>
                   <div className="mt-2 flex justify-between mono text-[9px] text-primary-foreground/45"><span>EURUSD · M15</span><span>next scan 00:18</span></div>
                 </div>
-                <div className="mt-4 space-y-3">
+                 <div className="mt-4 space-y-3">
                   {[['Strategy', 'SMC v2.4'], ['Risk per trade', '0.50%'], ['Max open risk', '1.50%'], ['Last decision', '09:42:18']].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border/60 pb-2.5 text-[11px] last:border-0 last:pb-0"><span className="text-muted-foreground">{label}</span><span className="mono text-[10px] font-medium">{value}</span></div>)}
                 </div>
+                 <div className="mt-5 flex items-center justify-between rounded-lg border border-border bg-background/45 px-3 py-2.5" data-testid="status-smc-engine">
+                   <div className="flex items-center gap-2">
+                     <span className={`h-2 w-2 rounded-full ${smcState === 'running' ? 'bg-[#177b69] pulse-dot' : 'bg-muted-foreground'}`} />
+                     <div>
+                       <div className="text-[11px] font-semibold">M15 SMC engine</div>
+                       <div className="mt-0.5 text-[9px] text-muted-foreground">analysis-only · synthetic candles</div>
+                     </div>
+                   </div>
+                   <button type="button" onClick={toggleSmc} data-testid="button-toggle-smc" className={`rounded-md px-2.5 py-1.5 mono text-[9px] font-semibold uppercase tracking-[.08em] transition ${smcState === 'running' ? 'bg-[#177b69]/10 text-[#177b69] hover:bg-[#177b69]/15' : 'bg-muted text-muted-foreground hover:text-foreground'}`}>
+                     {smcState === 'running' ? 'On' : 'Off'}
+                   </button>
+                 </div>
                 <div className="mt-5 flex gap-2">
                   <button type="button" onClick={toggleBot} data-testid="button-toggle-bot" className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2.5 text-[11px] font-semibold text-primary-foreground transition hover:opacity-90 active:scale-[.98]">{botState === 'running' ? <Pause size={14} /> : <Play size={14} />}{botState === 'running' ? 'Pause bot' : 'Resume bot'}</button>
                   <button type="button" onClick={refreshPulse} data-testid="button-simulate-tick" className="flex h-10 w-10 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:border-primary/40 hover:text-primary" aria-label="Record simulation tick"><RotateCcw size={14} /></button>
