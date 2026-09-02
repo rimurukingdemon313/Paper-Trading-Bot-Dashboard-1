@@ -90,6 +90,10 @@ type PaperTrade = {
 };
 
 type SmcSnapshot = {
+  symbol?: string;
+  live?: boolean;
+  dataSource?: string;
+  latestPrice?: number;
   overallContext?: { direction?: string; score?: number };
   liquiditySweeps?: unknown[];
   structureBreaks?: unknown[];
@@ -476,11 +480,12 @@ export default function Dashboard() {
                   <div className="flex items-center gap-2 text-[10px] text-primary-foreground/55"><span className="h-1.5 w-1.5 rounded-full bg-accent" /> DECISION LOOP</div>
                    <div className="mt-2 flex items-end justify-between gap-3"><span className="display text-[22px] font-semibold" data-testid="text-ai-decision">{aiDecision.decision}</span><span className="mono text-[10px] text-accent" data-testid="text-gemini-confidence">{aiDecision.confidence}% conf.</span></div>
                    <div className="mt-4 h-1 rounded-full bg-primary-foreground/10"><div className="h-1 rounded-full bg-accent transition-all" style={{ width: `${aiDecision.confidence}%` }} /></div>
-                   <div className="mt-2 flex justify-between mono text-[9px] text-primary-foreground/45"><span>GEMINI AI · EURUSD · M15</span><span>{smcSnapshot?.overallContext?.direction ? `SMC ${smcSnapshot.overallContext.direction}` : 'SMC ready'}</span></div>
+                   <div className="mt-2 flex justify-between gap-3 mono text-[9px] text-primary-foreground/45"><span>GEMINI AI · LIVE EURUSD · M15</span><span>{smcSnapshot?.latestPrice ? `price ${smcSnapshot.latestPrice.toFixed(5)}` : 'waiting for live scan'}</span></div>
                 </div>
                   <div className="mt-4 rounded-lg border border-border bg-background/45 p-3" data-testid="panel-ai-reasoning">
                     <div className="mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">Trade reasons</div>
-                    <p className="mt-1.5 text-[11px] leading-5 text-foreground/80">{aiDecision.reasoning}</p>
+                     <p className="mt-1.5 text-[11px] leading-5 text-foreground/80">{aiDecision.reasoning}</p>
+                     <div className="mt-2 border-t border-border/70 pt-2 mono text-[9px] text-muted-foreground">Live EURUSD price: {smcSnapshot?.latestPrice ? smcSnapshot.latestPrice.toFixed(5) : '—'} · {smcSnapshot?.dataSource ?? 'Awaiting live market data'}</div>
                   </div>
                   <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2.5 text-[10px] ${riskDecision.approved ? 'bg-[#177b69]/7 text-[#177b69]' : 'bg-[#c84e3d]/7 text-[#c84e3d]'}`} data-testid="status-risk-engine">
                     <ShieldCheck size={14} className="mt-0.5 shrink-0" />
@@ -494,7 +499,7 @@ export default function Dashboard() {
                      <span className={`h-2 w-2 rounded-full ${smcState === 'running' ? 'bg-[#177b69] pulse-dot' : 'bg-muted-foreground'}`} />
                      <div>
                        <div className="text-[11px] font-semibold">M15 SMC engine</div>
-                       <div className="mt-0.5 text-[9px] text-muted-foreground">analysis-only · synthetic candles</div>
+                        <div className="mt-0.5 text-[9px] text-muted-foreground">analysis-only · Live EURUSD Data</div>
                      </div>
                    </div>
                    <button type="button" onClick={toggleSmc} data-testid="button-toggle-smc" className={`rounded-md px-2.5 py-1.5 mono text-[9px] font-semibold uppercase tracking-[.08em] transition ${smcState === 'running' ? 'bg-[#177b69]/10 text-[#177b69] hover:bg-[#177b69]/15' : 'bg-muted text-muted-foreground hover:text-foreground'}`}>

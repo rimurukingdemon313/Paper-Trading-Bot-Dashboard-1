@@ -63,13 +63,17 @@ const workspaceFile = (name: string): string => {
 };
 
 async function loadSmcAnalysis(): Promise<Record<string, unknown>> {
-  const { stdout } = await execFileAsync("python3", [workspaceFile("run_smc_demo.py")], {
+  const { stdout } = await execFileAsync("python3", [workspaceFile("run_smc_demo.py"), "--live"], {
     cwd: path.dirname(workspaceFile("run_smc_demo.py")),
     maxBuffer: 2 * 1024 * 1024,
   });
   const parsed = JSON.parse(stdout) as Record<string, any>;
   return {
     timeframe: parsed.timeframe,
+    symbol: parsed.symbol,
+    live: parsed.live,
+    dataSource: parsed.data_source,
+    latestPrice: parsed.latest_price,
     candleCount: parsed.candle_count,
     latestCandle: parsed.latest_candle,
     marketStructure: parsed.market_structure,
