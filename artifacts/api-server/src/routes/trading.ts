@@ -3,6 +3,10 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Router, type Request, type Response } from "express";
+import {
+  getTradingSchedulerState,
+  setTradingSchedulerEnabled,
+} from "../lib/trading-scheduler";
 
 const execFileAsync = promisify(execFile);
 const router = Router();
@@ -13,7 +17,7 @@ type AccountSnapshot = {
   openPositions: number;
 };
 
-type GeminiDecision = {
+export type GeminiDecision = {
   decision: "BUY" | "SELL" | "NO TRADE";
   confidence: number;
   reasoning: string;
@@ -24,18 +28,38 @@ type GeminiDecision = {
   riskAmount: number | null;
 };
 
-type RiskDecision = {
+export type RiskDecision = {
   approved: boolean;
   state: "BUY" | "SELL" | "NO TRADE";
   reasons: string[];
-  rules: {
-    account_balance: number;
-    risk_per_trade: number;
-    risk_amount: number;
-    max_open_positions: number;
-    max_daily_loss: number;
-    min_risk_reward: number;
-  };
+  rules: Record<string, number>;
+};
+
+type TradingCycleResult = {
+  decision: string;
+  aiDecision: GeminiDecision;
+  risk: RiskDecision;
+  smc: Record<string, unknown>;
+  paperTrade: Record<string, unknown> | null;
+  closedTrades: Array<Record<string, unknown>>;
+  account: Record<string, unknown>;
+  openTrade: Record<string, unknown> | null;
+  trades: Array<Record<string, unknown>>;
+  paperOnly: true;
+  source: "manual" | "scheduled";
+  duplicate: boolean;
+};
+
+type DatabaseResponse = {
+  account: Record<string, unknown>;
+  openTrade?: Record<string, unknown> | null;
+  trades?: Array<Record<string, unknown>>;
+  paperTrade?: Record<string, unknown> | null;
+  closedTrades?: Array<Record<string, unknown>>;
+  duplicate?: boolean;
+  latestScan?: Record<string, unknown> | null;
+  latestAiDecision?: GeminiDecision | null;
+  latestRiskDecision?: RiskDecision | null;
 };
 
 const finiteOrNull = (value: unknown): number | null => {
@@ -56,15 +80,27 @@ const workspaceFile = (name: string): string => {
     path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../../", name),
   ];
   const found = candidates.find((candidate) => existsSync(candidate));
-  if (!found) {
-    throw new Error(`Unable to locate ${name}`);
-  }
+  if (!found) throw new Error(`Unable to locate ${name}`);
   return found;
 };
 
+async function database(
+  action: "state" | "settle" | "record-cycle" | "reset",
+  payload: Record<string, unknown> = {},
+): Promise<DatabaseResponse> {
+  const script = workspaceFile("trading_bot_db.py");
+  const { stdout } = await execFileAsync(
+    "python3",
+    [script, action, JSON.stringify(payload)],
+    { cwd: path.dirname(script), maxBuffer: 4 * 1024 * 1024 },
+  );
+  return JSON.parse(stdout) as DatabaseResponse;
+}
+
 async function loadSmcAnalysis(): Promise<Record<string, unknown>> {
-  const { stdout } = await execFileAsync("python3", [workspaceFile("run_smc_demo.py"), "--live"], {
-    cwd: path.dirname(workspaceFile("run_smc_demo.py")),
+  const script = workspaceFile("run_smc_demo.py");
+  const { stdout } = await execFileAsync("python3", [script, "--live"], {
+    cwd: path.dirname(script),
     maxBuffer: 2 * 1024 * 1024,
   });
   const parsed = JSON.parse(stdout) as Record<string, any>;
@@ -100,9 +136,7 @@ function parseGeminiJson(rawText: string): Record<string, unknown> {
 
 async function askGemini(smc: Record<string, unknown>): Promise<GeminiDecision> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not configured on the API server");
-  }
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the API server");
 
   const prompt = [
     "You are a paper-trading SMC decision analyst. This is analysis only: never mention broker execution and never assume live market data.",
@@ -119,10 +153,7 @@ async function askGemini(smc: Record<string, unknown>): Promise<GeminiDecision> 
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
@@ -133,7 +164,6 @@ async function askGemini(smc: Record<string, unknown>): Promise<GeminiDecision> 
       }),
     },
   );
-
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`Gemini request failed (${response.status}): ${detail.slice(0, 240)}`);
@@ -146,16 +176,12 @@ async function askGemini(smc: Record<string, unknown>): Promise<GeminiDecision> 
     ?.map((part) => part.text ?? "")
     .join("")
     .trim();
-  if (!rawText) {
-    throw new Error("Gemini returned an empty decision");
-  }
+  if (!rawText) throw new Error("Gemini returned an empty decision");
 
   const parsed = parseGeminiJson(rawText);
   const decision = String(parsed.decision ?? "NO TRADE").toUpperCase();
-  const normalizedDecision =
-    decision === "BUY" || decision === "SELL" ? decision : "NO TRADE";
   return {
-    decision: normalizedDecision,
+    decision: decision === "BUY" || decision === "SELL" ? decision : "NO TRADE",
     confidence: clampConfidence(parsed.confidence),
     reasoning: String(parsed.reasoning ?? "Gemini did not provide reasoning."),
     entryPrice: finiteOrNull(parsed.entryPrice),
@@ -170,6 +196,7 @@ async function runRiskEngine(
   proposal: GeminiDecision,
   account: AccountSnapshot,
 ): Promise<RiskDecision> {
+  const script = workspaceFile("risk_engine.py");
   const payload = JSON.stringify({
     proposal: {
       decision: proposal.decision,
@@ -185,62 +212,103 @@ async function runRiskEngine(
       open_positions: account.openPositions,
     },
   });
-  const { stdout } = await execFileAsync("python3", [workspaceFile("risk_engine.py"), payload], {
-    cwd: path.dirname(workspaceFile("risk_engine.py")),
+  const { stdout } = await execFileAsync("python3", [script, payload], {
+    cwd: path.dirname(script),
     maxBuffer: 64 * 1024,
   });
   return JSON.parse(stdout) as RiskDecision;
 }
 
-function parseAccount(value: unknown): AccountSnapshot {
-  if (!value || typeof value !== "object") {
-    throw new Error("account snapshot is required");
-  }
-  const candidate = value as Record<string, unknown>;
-  const balance = finiteOrNull(candidate.balance);
-  const dailyPnl = finiteOrNull(candidate.dailyPnl);
-  const openPositions = finiteOrNull(candidate.openPositions);
-  if (balance === null || dailyPnl === null || openPositions === null || openPositions < 0) {
-    throw new Error("account snapshot contains invalid values");
-  }
-  return { balance, dailyPnl, openPositions: Math.floor(openPositions) };
+async function executeTradingCycle(
+  source: "manual" | "scheduled",
+): Promise<TradingCycleResult> {
+  const smc = await loadSmcAnalysis();
+  const latestCandle = smc.latestCandle as Record<string, unknown> | undefined;
+  const settled = await database("settle", {
+    latestPrice: smc.latestPrice,
+    latestCandle,
+  });
+  const account = settled.account as unknown as AccountSnapshot;
+  const aiDecision = await askGemini(smc);
+  const risk = await runRiskEngine(aiDecision, account);
+  const recorded = await database("record-cycle", {
+    scan: {
+      candleTimestamp: latestCandle?.timestamp,
+      scannedAt: new Date().toISOString(),
+      symbol: smc.symbol,
+      timeframe: smc.timeframe,
+      live: smc.live,
+      dataSource: smc.dataSource,
+      latestPrice: smc.latestPrice,
+      candleCount: smc.candleCount,
+      latestCandle,
+      smc,
+    },
+    ai: aiDecision,
+    risk,
+  });
+  const effectiveAiDecision =
+    recorded.duplicate && recorded.latestAiDecision
+      ? recorded.latestAiDecision
+      : aiDecision;
+  const effectiveRisk =
+    recorded.duplicate && recorded.latestRiskDecision
+      ? recorded.latestRiskDecision
+      : risk;
+  return {
+    decision: effectiveRisk.state,
+    aiDecision: effectiveAiDecision,
+    risk: effectiveRisk,
+    smc,
+    paperTrade: recorded.paperTrade ?? null,
+    closedTrades: settled.closedTrades ?? [],
+    account: recorded.account,
+    openTrade: recorded.openTrade ?? null,
+    trades: recorded.trades ?? [],
+    paperOnly: true,
+    source,
+    duplicate: recorded.duplicate ?? false,
+  };
 }
+
+let activeCycle: Promise<TradingCycleResult> | null = null;
+
+export async function runTradingCycle(
+  source: "manual" | "scheduled" = "manual",
+): Promise<TradingCycleResult> {
+  if (activeCycle) return activeCycle;
+  activeCycle = executeTradingCycle(source);
+  try {
+    return await activeCycle;
+  } finally {
+    activeCycle = null;
+  }
+}
+
+function schedulerResponse() {
+  return { ...getTradingSchedulerState(), paperOnly: true };
+}
+
+router.get("/trading/state", async (_req: Request, res: Response) => {
+  try {
+    const stored = await database("state");
+    return res.json({ ...stored, scheduler: schedulerResponse(), paperOnly: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to load trading state";
+    return res.status(502).json({ error: message, paperOnly: true });
+  }
+});
 
 router.post("/trading/analyze", async (req: Request, res: Response) => {
   try {
-    const account = parseAccount(req.body?.account);
     if (req.body?.smcEnabled === false) {
       return res.status(409).json({
         decision: "NO TRADE",
         risk: { approved: false, state: "NO TRADE", reasons: ["SMC engine is paused"], rules: {} },
-        error: "SMC engine is paused",
+        paperOnly: true,
       });
     }
-
-    const smc = await loadSmcAnalysis();
-    const aiDecision = await askGemini(smc);
-    const risk = await runRiskEngine(aiDecision, account);
-    const paperTrade = risk.approved
-      ? {
-          id: `paper-${Date.now()}`,
-          symbol: "EURUSD",
-          side: aiDecision.decision,
-          status: "OPEN",
-          entryPrice: aiDecision.entryPrice,
-          stopLoss: aiDecision.stopLoss,
-          takeProfit: aiDecision.takeProfit,
-          riskAmount: 5,
-        }
-      : null;
-
-    return res.json({
-      decision: risk.state,
-      aiDecision,
-      risk,
-      paperTrade,
-      smc,
-      paperOnly: true,
-    });
+    return res.json({ ...(await runTradingCycle("manual")), scheduler: schedulerResponse() });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Trading analysis failed";
     req.log?.error?.({ err: error }, "Trading analysis failed");
@@ -254,6 +322,30 @@ router.post("/trading/analyze", async (req: Request, res: Response) => {
       },
       paperOnly: true,
     });
+  }
+});
+
+router.post("/trading/scheduler", (req: Request, res: Response) => {
+  const enabled = req.body?.enabled;
+  if (typeof enabled !== "boolean") {
+    return res.status(400).json({ error: "enabled must be a boolean" });
+  }
+  return res.json({
+    scheduler: setTradingSchedulerEnabled(enabled, async (source) => runTradingCycle(source)),
+    paperOnly: true,
+  });
+});
+
+router.post("/trading/reset", async (_req: Request, res: Response) => {
+  try {
+    return res.json({
+      ...(await database("reset")),
+      scheduler: schedulerResponse(),
+      paperOnly: true,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to reset paper account";
+    return res.status(502).json({ error: message, paperOnly: true });
   }
 });
 

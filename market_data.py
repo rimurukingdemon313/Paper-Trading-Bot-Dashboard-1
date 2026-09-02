@@ -31,6 +31,7 @@ def parse_yahoo_chart_payload(
     *,
     symbol: str = "EURUSD",
     timeframe: str = "M15",
+    closed_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Convert Yahoo's chart response into SMC-engine candle mappings."""
 
@@ -62,6 +63,12 @@ def parse_yahoo_chart_payload(
             timestamp_value = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
         except (TypeError, ValueError, OverflowError) as exc:
             raise MarketDataError("Yahoo returned an invalid candle timestamp") from exc
+        if closed_only and (
+            timestamp_value.minute % 15 != 0
+            or timestamp_value.second != 0
+            or timestamp_value.microsecond != 0
+        ):
+            continue
         volume_values = quote.get("volume", [])
         volume = _finite_number(volume_values[index]) if index < len(volume_values) else None
         candles.append(
@@ -108,4 +115,9 @@ def fetch_live_eur_usd_m15(*, range_value: str = "5d", timeout: int = 20) -> lis
     except (TimeoutError, json.JSONDecodeError) as exc:
         raise MarketDataError("Yahoo returned an unreadable market-data response") from exc
 
-    return parse_yahoo_chart_payload(payload, symbol="EURUSD", timeframe="M15")
+    return parse_yahoo_chart_payload(
+        payload,
+        symbol="EURUSD",
+        timeframe="M15",
+        closed_only=True,
+    )
