@@ -17,7 +17,8 @@ from typing import Any, Mapping
 ACCOUNT_BALANCE = 1000.0
 RISK_PER_TRADE = 0.005
 RISK_AMOUNT = 5.0
-MAX_OPEN_POSITIONS = 1
+MAX_OPEN_POSITIONS_PER_SYMBOL = 1
+MAX_TOTAL_OPEN_POSITIONS = 6
 MAX_DAILY_LOSS = 20.0
 MIN_RISK_REWARD = 2.0
 
@@ -118,9 +119,10 @@ class RiskEngine:
             reasons.append("AI decision is NO TRADE")
         if snapshot.balance <= 0:
             reasons.append("Account balance must be positive")
-        if snapshot.open_positions >= MAX_OPEN_POSITIONS:
+        if snapshot.open_positions >= MAX_OPEN_POSITIONS_PER_SYMBOL:
             reasons.append(
-                f"Open position limit reached ({MAX_OPEN_POSITIONS} maximum)"
+                f"Open position limit reached for this symbol "
+                f"({MAX_OPEN_POSITIONS_PER_SYMBOL} maximum)"
             )
         if snapshot.daily_pnl <= -MAX_DAILY_LOSS:
             reasons.append(
@@ -169,7 +171,8 @@ class RiskEngine:
             "account_balance": ACCOUNT_BALANCE,
             "risk_per_trade": RISK_PER_TRADE,
             "risk_amount": RISK_AMOUNT,
-            "max_open_positions": MAX_OPEN_POSITIONS,
+            "max_open_positions_per_symbol": MAX_OPEN_POSITIONS_PER_SYMBOL,
+            "max_total_open_positions": MAX_TOTAL_OPEN_POSITIONS,
             "max_daily_loss": MAX_DAILY_LOSS,
             "min_risk_reward": MIN_RISK_REWARD,
         }
