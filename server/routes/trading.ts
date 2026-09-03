@@ -11,6 +11,17 @@ import {
 const execFileAsync = promisify(execFile);
 const router = Router();
 
+// All symbols the bot scans, analyzes, and can hold paper positions in.
+export const TRADED_SYMBOLS = [
+  "EURUSD",
+  "USDJPY",
+  "USDCHF",
+  "AUDJPY",
+  "AUDCHF",
+  "XAUUSD",
+] as const;
+export type TradedSymbol = (typeof TRADED_SYMBOLS)[number];
+
 type AccountSnapshot = {
   balance: number;
   dailyPnl: number;
@@ -35,6 +46,16 @@ export type RiskDecision = {
   rules: Record<string, number>;
 };
 
+type SymbolCycleResult = {
+  symbol: TradedSymbol;
+  decision: string;
+  aiDecision: GeminiDecision;
+  risk: RiskDecision;
+  smc: Record<string, unknown>;
+  paperTrade: Record<string, unknown> | null;
+  duplicate: boolean;
+};
+
 type TradingCycleResult = {
   decision: string;
   aiDecision: GeminiDecision;
@@ -48,6 +69,7 @@ type TradingCycleResult = {
   paperOnly: true;
   source: "manual" | "scheduled";
   duplicate: boolean;
+  bySymbol: SymbolCycleResult[];
 };
 
 type DatabaseResponse = {
@@ -103,12 +125,13 @@ export async function getPersistedSchedulerEnabled(): Promise<boolean> {
   return stored.schedulerEnabled !== false;
 }
 
-async function loadSmcAnalysis(): Promise<Record<string, unknown>> {
+async function loadSmcAnalysis(symbol: TradedSymbol): Promise<Record<string, unknown>> {
   const script = workspaceFile("run_smc_demo.py");
-  const { stdout } = await execFileAsync("python3", [script, "--live"], {
-    cwd: path.dirname(script),
-    maxBuffer: 2 * 1024 * 1024,
-  });
+  const { stdout } = await execFileAsync(
+    "python3",
+    [script, "--live", "--symbol", symbol],
+    { cwd: path.dirname(script), maxBuffer: 2 * 1024 * 1024 },
+  );
   const parsed = JSON.parse(stdout) as Record<string, any>;
   return {
     timeframe: parsed.timeframe,
@@ -140,18 +163,21 @@ function parseGeminiJson(rawText: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-async function askGemini(smc: Record<string, unknown>): Promise<GeminiDecision> {
+async function askGemini(
+  symbol: TradedSymbol,
+  smc: Record<string, unknown>,
+): Promise<GeminiDecision> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the API server");
 
   const prompt = [
-    "You are a paper-trading SMC decision analyst. This is analysis only: never mention broker execution and never assume live market data.",
+    `You are a paper-trading SMC decision analyst for ${symbol}. This is analysis only: never mention broker execution and never assume live market data.`,
     "Use only the supplied M15 SMC findings. Return JSON only, with no markdown.",
     "Choose exactly one decision: BUY, SELL, or NO TRADE.",
     "For BUY or SELL, provide entryPrice, stopLoss, takeProfit, riskRewardRatio, and riskAmount. riskAmount must be exactly 5.",
     "When evidence is mixed or insufficient, choose NO TRADE. Confidence must be an integer from 0 to 100.",
     'JSON shape: {"decision":"BUY|SELL|NO TRADE","confidence":0,"reasoning":"detailed evidence-based explanation","entryPrice":0,"stopLoss":0,"takeProfit":0,"riskRewardRatio":0,"riskAmount":5}',
-    "SMC findings:",
+    `SMC findings for ${symbol}:`,
     JSON.stringify(smc),
   ].join("\n");
 
@@ -225,23 +251,34 @@ async function runRiskEngine(
   return JSON.parse(stdout) as RiskDecision;
 }
 
-async function executeTradingCycle(
-  source: "manual" | "scheduled",
-): Promise<TradingCycleResult> {
-  const smc = await loadSmcAnalysis();
+async function symbolHasOpenPosition(symbol: TradedSymbol): Promise<boolean> {
+  const state = await database("state");
+  const trades = (state.trades ?? []) as Array<Record<string, unknown>>;
+  return trades.some(
+    (trade) => trade.symbol === symbol && trade.result === "OPEN",
+  );
+}
+
+async function executeSymbolCycle(symbol: TradedSymbol): Promise<{
+  result: SymbolCycleResult;
+  quote: { latestPrice: unknown; latestCandle: unknown };
+}> {
+  const smc = await loadSmcAnalysis(symbol);
   const latestCandle = smc.latestCandle as Record<string, unknown> | undefined;
-  const settled = await database("settle", {
-    latestPrice: smc.latestPrice,
-    latestCandle,
-  });
-  const account = settled.account as unknown as AccountSnapshot;
-  const aiDecision = await askGemini(smc);
-  const risk = await runRiskEngine(aiDecision, account);
+  const hasOpen = await symbolHasOpenPosition(symbol);
+  const stateNow = await database("state");
+  const account = stateNow.account as unknown as AccountSnapshot;
+  const accountForSymbol: AccountSnapshot = {
+    ...account,
+    openPositions: hasOpen ? 1 : 0,
+  };
+  const aiDecision = await askGemini(symbol, smc);
+  const risk = await runRiskEngine(aiDecision, accountForSymbol);
   const recorded = await database("record-cycle", {
     scan: {
       candleTimestamp: latestCandle?.timestamp,
       scannedAt: new Date().toISOString(),
-      symbol: smc.symbol,
+      symbol,
       timeframe: smc.timeframe,
       live: smc.live,
       dataSource: smc.dataSource,
@@ -262,22 +299,85 @@ async function executeTradingCycle(
       ? recorded.latestRiskDecision
       : risk;
   return {
-    decision: effectiveRisk.state,
-    aiDecision: effectiveAiDecision,
-    risk: effectiveRisk,
-    smc,
-    paperTrade: recorded.paperTrade ?? null,
-    closedTrades: settled.closedTrades ?? [],
-    account: recorded.account,
-    openTrade: recorded.openTrade ?? null,
-    trades: recorded.trades ?? [],
-    paperOnly: true,
-    source,
-    duplicate: recorded.duplicate ?? false,
+    result: {
+      symbol,
+      decision: effectiveRisk.state,
+      aiDecision: effectiveAiDecision,
+      risk: effectiveRisk,
+      smc,
+      paperTrade: recorded.paperTrade ?? null,
+      duplicate: recorded.duplicate ?? false,
+    },
+    quote: { latestPrice: smc.latestPrice, latestCandle },
   };
 }
 
 let activeCycle: Promise<TradingCycleResult> | null = null;
+
+async function executeTradingCycle(
+  source: "manual" | "scheduled",
+): Promise<TradingCycleResult> {
+  const bySymbol: SymbolCycleResult[] = [];
+  const quotes: Record<string, { latestPrice: unknown; latestCandle: unknown }> = {};
+
+  // Scan every symbol sequentially. Sequential (not parallel) keeps each
+  // python3 subprocess call simple and avoids SQLite write contention.
+  for (const symbol of TRADED_SYMBOLS) {
+    try {
+      const { result, quote } = await executeSymbolCycle(symbol);
+      bySymbol.push(result);
+      quotes[symbol] = quote;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      bySymbol.push({
+        symbol,
+        decision: "NO TRADE",
+        aiDecision: {
+          decision: "NO TRADE",
+          confidence: 0,
+          reasoning: `Scan failed: ${message}`,
+          entryPrice: null,
+          stopLoss: null,
+          takeProfit: null,
+          riskRewardRatio: null,
+          riskAmount: null,
+        },
+        risk: {
+          approved: false,
+          state: "NO TRADE",
+          reasons: [`No trade: ${message}`],
+          rules: {},
+        },
+        smc: {},
+        paperTrade: null,
+        duplicate: false,
+      });
+    }
+  }
+
+  // Settle all open positions across every symbol using each symbol's own
+  // latest quote, then fetch the final combined state.
+  const settled = await database("settle", { quotes });
+  const finalState = await database("state");
+
+  const primary = bySymbol.find((entry) => entry.paperTrade) ?? bySymbol[0];
+
+  return {
+    decision: primary.decision,
+    aiDecision: primary.aiDecision,
+    risk: primary.risk,
+    smc: primary.smc,
+    paperTrade: primary.paperTrade,
+    closedTrades: settled.closedTrades ?? [],
+    account: finalState.account ?? settled.account,
+    openTrade: finalState.openTrade ?? null,
+    trades: finalState.trades ?? [],
+    paperOnly: true,
+    source,
+    duplicate: bySymbol.every((entry) => entry.duplicate),
+    bySymbol,
+  };
+}
 
 export async function runTradingCycle(
   source: "manual" | "scheduled" = "manual",
