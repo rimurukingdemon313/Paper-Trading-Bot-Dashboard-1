@@ -13,6 +13,17 @@ from urllib.request import Request, urlopen
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 
+# Symbol -> Yahoo Finance ticker. Add pairs here; everything else in the
+# system reads from this map, so this is the single source of truth.
+SUPPORTED_SYMBOLS: dict[str, str] = {
+    "EURUSD": "EURUSD=X",
+    "USDJPY": "USDJPY=X",
+    "USDCHF": "USDCHF=X",
+    "AUDJPY": "AUDJPY=X",
+    "AUDCHF": "AUDCHF=X",
+    "XAUUSD": "XAUUSD=X",
+}
+
 
 class MarketDataError(RuntimeError):
     """Raised when the live source cannot provide valid M15 candles."""
@@ -90,8 +101,14 @@ def parse_yahoo_chart_payload(
     return candles
 
 
-def fetch_live_eur_usd_m15(*, range_value: str = "5d", timeout: int = 20) -> list[dict[str, Any]]:
-    """Fetch the latest EURUSD=X M15 candles from Yahoo Finance."""
+def fetch_live_m15(symbol: str, *, range_value: str = "5d", timeout: int = 20) -> list[dict[str, Any]]:
+    """Fetch the latest M15 candles for a supported symbol from Yahoo Finance."""
+
+    normalized = symbol.upper()
+    ticker = SUPPORTED_SYMBOLS.get(normalized)
+    if ticker is None:
+        supported = ", ".join(sorted(SUPPORTED_SYMBOLS))
+        raise MarketDataError(f"unsupported symbol {symbol!r}; supported symbols: {supported}")
 
     query = urlencode(
         {
@@ -102,22 +119,28 @@ def fetch_live_eur_usd_m15(*, range_value: str = "5d", timeout: int = 20) -> lis
         }
     )
     request = Request(
-        f"{YAHOO_CHART_URL}/EURUSD=X?{query}",
+        f"{YAHOO_CHART_URL}/{ticker}?{query}",
         headers={"User-Agent": "FieldworkPaperTrading/1.0"},
     )
     try:
         with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        raise MarketDataError(f"Yahoo HTTP error {exc.code}") from exc
+        raise MarketDataError(f"Yahoo HTTP error {exc.code} for {normalized}") from exc
     except URLError as exc:
-        raise MarketDataError(f"Yahoo network error: {exc.reason}") from exc
+        raise MarketDataError(f"Yahoo network error for {normalized}: {exc.reason}") from exc
     except (TimeoutError, json.JSONDecodeError) as exc:
-        raise MarketDataError("Yahoo returned an unreadable market-data response") from exc
+        raise MarketDataError(f"Yahoo returned an unreadable market-data response for {normalized}") from exc
 
     return parse_yahoo_chart_payload(
         payload,
-        symbol="EURUSD",
+        symbol=normalized,
         timeframe="M15",
         closed_only=True,
     )
+
+
+def fetch_live_eur_usd_m15(*, range_value: str = "5d", timeout: int = 20) -> list[dict[str, Any]]:
+    """Backward-compatible EURUSD-only helper. Kept so nothing else breaks."""
+
+    return fetch_live_m15("EURUSD", range_value=range_value, timeout=timeout)
