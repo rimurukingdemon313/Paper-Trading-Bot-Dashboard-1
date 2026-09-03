@@ -1,4 +1,4 @@
-"""Run M15 SMC analysis against live EURUSD data or a test fixture."""
+"""Run M15 SMC analysis against live market data or a test fixture."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from analysis_engine import Candle, SMCAnalyzer
-from market_data import fetch_live_eur_usd_m15
+from market_data import SUPPORTED_SYMBOLS, fetch_live_m15
 
 
 def main() -> None:
@@ -15,14 +15,20 @@ def main() -> None:
     parser.add_argument(
         "--fixture",
         action="store_true",
-        help="use deterministic verification candles instead of live EURUSD data",
+        help="use deterministic verification candles instead of live data",
     )
     parser.add_argument(
         "--live",
         action="store_true",
-        help="explicitly request live EURUSD data (the default)",
+        help="explicitly request live data (the default)",
+    )
+    parser.add_argument(
+        "--symbol",
+        default="EURUSD",
+        help=f"symbol to analyze; one of {', '.join(sorted(SUPPORTED_SYMBOLS))}",
     )
     args = parser.parse_args()
+    symbol = args.symbol.upper()
 
     if args.fixture:
         fixture = Path(__file__).parent / "analysis_engine" / "fixtures" / "m15_sample.json"
@@ -30,7 +36,7 @@ def main() -> None:
         data_source = "Synthetic verification fixture"
         live = False
     else:
-        rows = fetch_live_eur_usd_m15()
+        rows = fetch_live_m15(symbol)
         data_source = "Yahoo Finance live chart data"
         live = True
 
@@ -38,7 +44,7 @@ def main() -> None:
     output = analysis.to_dict()
     output.update(
         {
-            "symbol": "EURUSD",
+            "symbol": symbol,
             "data_source": data_source,
             "live": live,
             "latest_price": output["latest_candle"]["close"],
