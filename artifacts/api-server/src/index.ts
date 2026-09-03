@@ -2,6 +2,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { runTradingCycle } from "./routes/trading";
 import { startTradingScheduler } from "./lib/trading-scheduler";
+import { getPersistedSchedulerEnabled } from "./routes/trading";
 
 const rawPort = process.env["PORT"];
 
@@ -24,7 +25,16 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
-  startTradingScheduler(async (source) => {
-    await runTradingCycle(source);
-  });
+  getPersistedSchedulerEnabled()
+    .then((enabled) => {
+      startTradingScheduler(async (source) => {
+        await runTradingCycle(source);
+      }, enabled);
+    })
+    .catch((error) => {
+      logger.error({ err: error }, "Unable to load scheduler state; starting enabled");
+      startTradingScheduler(async (source) => {
+        await runTradingCycle(source);
+      });
+    });
 });

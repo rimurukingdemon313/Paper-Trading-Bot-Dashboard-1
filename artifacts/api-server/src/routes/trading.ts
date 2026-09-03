@@ -60,6 +60,7 @@ type DatabaseResponse = {
   latestScan?: Record<string, unknown> | null;
   latestAiDecision?: GeminiDecision | null;
   latestRiskDecision?: RiskDecision | null;
+  schedulerEnabled?: boolean;
 };
 
 const finiteOrNull = (value: unknown): number | null => {
@@ -85,7 +86,7 @@ const workspaceFile = (name: string): string => {
 };
 
 async function database(
-  action: "state" | "settle" | "record-cycle" | "reset",
+  action: "state" | "settle" | "record-cycle" | "scheduler" | "reset",
   payload: Record<string, unknown> = {},
 ): Promise<DatabaseResponse> {
   const script = workspaceFile("trading_bot_db.py");
@@ -95,6 +96,11 @@ async function database(
     { cwd: path.dirname(script), maxBuffer: 4 * 1024 * 1024 },
   );
   return JSON.parse(stdout) as DatabaseResponse;
+}
+
+export async function getPersistedSchedulerEnabled(): Promise<boolean> {
+  const stored = await database("state");
+  return stored.schedulerEnabled !== false;
 }
 
 async function loadSmcAnalysis(): Promise<Record<string, unknown>> {
@@ -330,10 +336,16 @@ router.post("/trading/scheduler", (req: Request, res: Response) => {
   if (typeof enabled !== "boolean") {
     return res.status(400).json({ error: "enabled must be a boolean" });
   }
-  return res.json({
-    scheduler: setTradingSchedulerEnabled(enabled, async (source) => runTradingCycle(source)),
-    paperOnly: true,
-  });
+  return database("scheduler", { enabled })
+    .then(() => ({
+      scheduler: setTradingSchedulerEnabled(enabled, async (source) => runTradingCycle(source)),
+      paperOnly: true,
+    }))
+    .then((payload) => res.json(payload))
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : "Unable to update scheduler";
+      return res.status(502).json({ error: message, paperOnly: true });
+    });
 });
 
 router.post("/trading/reset", async (_req: Request, res: Response) => {

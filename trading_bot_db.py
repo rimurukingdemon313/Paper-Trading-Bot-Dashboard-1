@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -35,6 +35,12 @@ def connect() -> sqlite3.Connection:
 def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
+        CREATE TABLE IF NOT EXISTS bot_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO bot_config (key, value) VALUES ('scheduler_enabled', '1');
+
         CREATE TABLE IF NOT EXISTS scans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             candle_timestamp TEXT NOT NULL UNIQUE,
@@ -161,6 +167,13 @@ def account(connection: sqlite3.Connection) -> dict[str, Any]:
         for row in closed
         if str(row["closed_at"] or "").startswith(month)
     )
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    roi_30d_pnl = sum(
+        float(row["pnl"] or 0)
+        for row in closed
+        if row["closed_at"]
+        and datetime.fromisoformat(str(row["closed_at"]).replace("Z", "+00:00")) >= cutoff
+    )
     snapshots = connection.execute(
         "SELECT peak, balance FROM account_snapshots ORDER BY id ASC"
     ).fetchall()
@@ -170,6 +183,8 @@ def account(connection: sqlite3.Connection) -> dict[str, Any]:
         "balance": round(balance, 8),
         "dailyPnl": round(daily_pnl, 8),
         "monthlyPnl": round(monthly_pnl, 8),
+        "pnl30d": round(roi_30d_pnl, 8),
+        "roi30d": round((roi_30d_pnl / STARTING_BALANCE) * 100, 8),
         "trades": trades,
         "wins": wins,
         "losses": losses,
@@ -290,6 +305,9 @@ def current_state(connection: sqlite3.Connection, limit: int = 50) -> dict[str, 
         "SELECT balance FROM account_snapshots ORDER BY id ASC LIMIT 30"
     ).fetchall()
     values = account(connection)
+    scheduler_enabled = connection.execute(
+        "SELECT value FROM bot_config WHERE key = 'scheduler_enabled'"
+    ).fetchone()
     return {
         "account": values,
         "openTrade": serialize_trade(active_row, latest_price),
@@ -335,6 +353,7 @@ def current_state(connection: sqlite3.Connection, limit: int = 50) -> dict[str, 
             if scan_row
             else None
         ),
+        "schedulerEnabled": bool(scheduler_enabled and scheduler_enabled["value"] == "1"),
     }
 
 
@@ -551,9 +570,19 @@ def reset(connection: sqlite3.Connection) -> dict[str, Any]:
     return current_state(connection)
 
 
+def set_scheduler(connection: sqlite3.Connection, payload: Mapping[str, Any]) -> dict[str, Any]:
+    enabled = bool(payload.get("enabled"))
+    connection.execute(
+        "INSERT INTO bot_config (key, value) VALUES ('scheduler_enabled', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ("1" if enabled else "0",),
+    )
+    return current_state(connection)
+
+
 def main() -> None:
     if len(sys.argv) != 3:
-        raise SystemExit("usage: python3 trading_bot_db.py <state|settle|record-cycle|reset> '<json>'")
+        raise SystemExit("usage: python3 trading_bot_db.py <state|settle|record-cycle|scheduler|reset> '<json>'")
     action = sys.argv[1]
     payload = json.loads(sys.argv[2])
     with connect() as connection:
@@ -564,6 +593,8 @@ def main() -> None:
             result = settle(connection, payload)
         elif action == "record-cycle":
             result = record_cycle(connection, payload)
+        elif action == "scheduler":
+            result = set_scheduler(connection, payload)
         elif action == "reset":
             result = reset(connection)
         else:

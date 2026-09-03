@@ -4,7 +4,6 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
-  Bell,
   Bot,
   BrainCircuit,
   ChevronDown,
@@ -52,6 +51,8 @@ type AccountModel = {
   balance: number;
   dailyPnl: number;
   monthlyPnl: number;
+  pnl30d: number;
+  roi30d: number;
   trades: number;
   wins: number;
   losses: number;
@@ -142,6 +143,8 @@ const startingAccount: AccountModel = {
   balance: 1000,
   dailyPnl: 0,
   monthlyPnl: 0,
+  pnl30d: 0,
+  roi30d: 0,
   trades: 0,
   wins: 0,
   losses: 0,
@@ -196,7 +199,6 @@ function Sidebar() {
     { label: 'Risk Engine', icon: ShieldCheck },
     { label: 'Paper Trading', icon: WalletCards },
     { label: 'Trade Logs', icon: Database },
-    { label: 'Notifications', icon: Bell },
   ];
   return (
     <aside className="hidden min-h-[100dvh] w-[244px] shrink-0 flex-col bg-sidebar px-4 py-5 text-sidebar-foreground md:flex">
@@ -262,8 +264,11 @@ function MetricCard({ label, value, detail, tone = 'neutral', icon: Icon, testId
 }
 
 function TrendChart({ values }: { values: number[] }) {
-  const min = Math.min(...values) - 8;
-  const max = Math.max(...values) + 8;
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const padding = Math.max(8, (rawMax - rawMin) * 0.18);
+  const min = rawMin - padding;
+  const max = rawMax + padding;
   const points = values.map((value, index) => {
     const x = (index / (values.length - 1)) * 100;
     const y = 100 - ((value - min) / (max - min)) * 78 - 8;
@@ -275,8 +280,8 @@ function TrendChart({ values }: { values: number[] }) {
       <div className="pointer-events-none absolute inset-0 flex flex-col justify-between px-3 py-5">
         {[0, 1, 2, 3].map((line) => <div key={line} className="border-t border-dashed border-border/60" />)}
       </div>
-      <div className="pointer-events-none absolute right-3 top-3 flex flex-col items-end gap-[48px] mono text-[9px] text-muted-foreground/60">
-        <span>$1,100</span><span>$1,050</span><span>$1,000</span>
+       <div className="pointer-events-none absolute right-3 top-3 flex flex-col items-end gap-[48px] mono text-[9px] text-muted-foreground/60">
+         <span>{formatMoney(max)}</span><span>{formatMoney((max + min) / 2)}</span><span>{formatMoney(min)}</span>
       </div>
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-x-3 bottom-8 top-5 h-[165px] w-[calc(100%-24px)] overflow-visible">
         <polygon points={areaPoints} fill="hsl(72 77% 57% / .12)" />
@@ -284,7 +289,7 @@ function TrendChart({ values }: { values: number[] }) {
         <circle cx="100" cy={points.split(' ').at(-1)?.split(',')[1]} r="2.2" fill="hsl(72 77% 43%)" vectorEffect="non-scaling-stroke" />
       </svg>
       <div className="absolute bottom-2 left-3 right-3 flex justify-between mono text-[9px] text-muted-foreground/65">
-        <span>01 MAY</span><span>08 MAY</span><span>15 MAY</span><span>22 MAY</span><span>NOW</span>
+         <span>START</span><span>RECORDED</span><span>NOW</span>
       </div>
     </div>
   );
@@ -295,8 +300,8 @@ function ActivityRow({ trade }: { trade: Trade }) {
   const isOpen = trade.result === 'OPEN';
   const isRejected = trade.result === 'REJECTED';
   return (
-    <div className="grid grid-cols-[72px_1fr_68px_76px] items-center gap-2 border-b border-border/60 py-3 last:border-0 sm:grid-cols-[82px_1fr_100px_82px_82px] sm:gap-3" data-testid={`row-trade-${trade.id}`}>
-      <div className="mono text-[10px] text-muted-foreground">{trade.time}</div>
+    <div className="grid grid-cols-[68px_1fr_76px_72px] items-center gap-2 border-b border-border/60 py-3 last:border-0 sm:grid-cols-[92px_1fr_82px_82px_82px_96px_72px] sm:gap-3" data-testid={`row-trade-${trade.id}`}>
+      <div className="mono text-[10px] text-muted-foreground">{formatDateTime(trade.time)}</div>
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <span className="text-[12px] font-semibold">{trade.symbol}</span>
@@ -304,7 +309,9 @@ function ActivityRow({ trade }: { trade: Trade }) {
         </div>
         <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{trade.setup}</div>
       </div>
-      <div className="hidden text-[11px] text-muted-foreground sm:block">{trade.confidence}% <span className="text-[9px]">AI</span></div>
+      <div className="hidden mono text-[10px] text-muted-foreground sm:block">{trade.entryPrice?.toFixed(5) ?? '—'}</div>
+      <div className="hidden mono text-[10px] text-muted-foreground sm:block">{trade.stopLoss?.toFixed(5) ?? '—'}</div>
+      <div className="hidden mono text-[10px] text-muted-foreground sm:block">{trade.takeProfit?.toFixed(5) ?? '—'}</div>
       <div className={`text-right ${isWin ? 'text-[#177b69]' : isOpen ? 'text-muted-foreground' : 'text-[#c84e3d]'}`}>
         <div className="mono text-[11px] font-medium">{isWin ? '+' : ''}{formatMoney(trade.pnl)}</div>
         <div className="mono mt-0.5 text-[9px] opacity-70">{trade.pnlPct >= 0 ? '+' : ''}{formatPct(trade.pnlPct)}</div>
@@ -479,10 +486,6 @@ export default function Dashboard() {
                   <ShieldCheck size={14} className="text-[#177b69]" />
                   <span className="text-[11px] font-semibold text-[#177b69]">PAPER TRADING ONLY</span>
                 </div>
-                <button type="button" onClick={() => setNotice('No new alerts')} data-testid="button-notifications" className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition hover:border-primary/40 hover:text-foreground">
-                  <Bell size={16} />
-                  <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[#d77a2e]" />
-                </button>
                 <div className="hidden h-9 w-9 items-center justify-center rounded-full bg-primary display text-[13px] font-semibold text-primary-foreground sm:flex" data-testid="avatar-user">AR</div>
               </div>
             </div>
@@ -505,8 +508,9 @@ export default function Dashboard() {
                     <span className="rounded border border-accent/30 bg-accent/15 px-1.5 py-0.5 mono text-[8px] uppercase tracking-[.08em] text-accent">virtual USD</span>
                   </div>
                   <div className="display mt-2 text-[38px] font-semibold tracking-[-.06em] sm:text-[46px]" data-testid="text-balance">{formatMoney(account.balance)}</div>
-                  <div className="mt-2 flex items-center gap-2 text-[11px] text-primary-foreground/60">
-                    <span className="inline-flex items-center gap-1 text-accent"><ArrowUpRight size={13} /> {formatMoney(account.balance - 1000)}</span>
+                   <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-primary-foreground/60">
+                     <span className="inline-flex items-center gap-1 text-accent"><ArrowUpRight size={13} /> {formatMoney(account.balance - 1000)}</span>
+                     <span className="mono text-accent">({account.balance >= 1000 ? '+' : ''}{formatPct(((account.balance - 1000) / 1000) * 100)})</span>
                     <span>since paper account start</span>
                   </div>
                 </div>
@@ -521,11 +525,11 @@ export default function Dashboard() {
                <MetricCard label="Total P/L" value={formatSignedMoney(account.balance - 1000)} detail="since paper account start" tone={account.balance >= 1000 ? 'positive' : 'negative'} icon={TrendingUp} testId="total-pnl" />
                <MetricCard label="Daily P/L" value={formatSignedMoney(account.dailyPnl)} detail="max loss $20.00" tone={account.dailyPnl < 0 ? 'negative' : 'positive'} icon={ArrowUpRight} testId="daily-pnl" />
                <MetricCard label="Monthly P/L" value={formatSignedMoney(account.monthlyPnl)} detail="paper account" tone={account.monthlyPnl < 0 ? 'negative' : 'positive'} icon={TrendingUp} testId="monthly-pnl" />
-              <MetricCard label="Trades" value={String(account.trades)} detail="all simulated" icon={Activity} testId="trades" />
+               <MetricCard label="Trades executed" value={String(account.trades)} detail="all simulated" icon={Activity} testId="trades" />
               <MetricCard label="Wins" value={String(account.wins)} detail={`${formatPct(winRate)} of trades`} tone="positive" icon={Target} testId="wins" />
               <MetricCard label="Losses" value={String(account.losses)} detail="risk contained" tone="negative" icon={ArrowDownRight} testId="losses" />
               <MetricCard label="Win rate" value={formatPct(winRate)} detail="target ≥ 55.0%" tone="positive" icon={Sparkles} testId="win-rate" />
-              <MetricCard label="Drawdown" value={formatPct(account.drawdown)} detail="from account peak" tone="neutral" icon={BarChart3} testId="drawdown" />
+               <MetricCard label="Max drawdown" value={formatPct(account.drawdown)} detail="from account peak" tone="neutral" icon={BarChart3} testId="drawdown" />
                <MetricCard label="Open trade" value={openTrade ? '1' : '0'} detail="max 1 permitted" tone={openTrade ? 'positive' : 'neutral'} icon={WalletCards} testId="open-trades" />
               <MetricCard label="Bot status" value={botState === 'running' ? 'Running' : 'Paused'} detail={botState === 'running' ? 'learning in sandbox' : 'no new decisions'} tone={botState === 'running' ? 'positive' : 'neutral'} icon={Bot} testId="bot-status" />
             </section>
@@ -537,7 +541,18 @@ export default function Dashboard() {
                   <div className="flex rounded-lg border border-border bg-background p-0.5 mono text-[9px] text-muted-foreground"><button type="button" onClick={() => setNotice('Showing 30 day simulation')} data-testid="button-range-30d" className="rounded-md bg-primary px-2.5 py-1.5 text-primary-foreground">30D</button><button type="button" onClick={() => setNotice('Showing all simulation history')} data-testid="button-range-all" className="px-2.5 py-1.5 hover:text-foreground">ALL</button></div>
                 </div>
                 <TrendChart values={trend} />
-                <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[10px] text-muted-foreground"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-accent" /> equity curve</span><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#d77a2e]" /> starting capital</span><span className="ml-auto mono text-[9px]">UPDATED 09:42:18 UTC</span></div>
+                 <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[10px] text-muted-foreground"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-accent" /> equity curve</span><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#d77a2e]" /> starting capital</span><span className="ml-auto mono text-[9px]">PERSISTED IN SQLITE</span></div>
+                 <div className="mt-5 rounded-xl border border-primary/15 bg-primary/[.035] p-4" data-testid="monthly-performance-summary">
+                   <div className="flex items-center justify-between gap-3">
+                     <div><div className="mono text-[9px] uppercase tracking-[.14em] text-muted-foreground">Monthly performance summary</div><div className="mt-1 text-[11px] text-muted-foreground">Rolling 30-day results</div></div>
+                     <div className={`mono text-[22px] font-semibold ${account.roi30d >= 0 ? 'text-[#177b69]' : 'text-[#c84e3d]'}`}>{account.roi30d >= 0 ? '+' : ''}{formatPct(account.roi30d)} <span className="text-[10px] font-normal text-muted-foreground">ROI</span></div>
+                   </div>
+                   <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border/70 pt-3">
+                     <div><div className="mono text-[9px] text-muted-foreground">30-day P/L</div><div className="mt-1 mono text-[11px] font-medium">{formatSignedMoney(account.pnl30d)}</div></div>
+                     <div><div className="mono text-[9px] text-muted-foreground">Wins</div><div className="mt-1 mono text-[11px] font-medium">{account.wins}</div></div>
+                     <div><div className="mono text-[9px] text-muted-foreground">Trades</div><div className="mt-1 mono text-[11px] font-medium">{account.trades}</div></div>
+                   </div>
+                 </div>
               </div>
 
               <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-3">
@@ -585,8 +600,8 @@ export default function Dashboard() {
 
             <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(300px,.55fr)]">
               <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-4">
-                <div className="flex items-center justify-between"><div><div className="flex items-center gap-2"><Clock3 size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Recent activity</h2></div><p className="mt-1 text-[11px] text-muted-foreground">Latest simulated decisions and fills</p></div><button type="button" onClick={() => setNotice('Trade log is local to this session')} data-testid="button-view-trade-log" className="flex items-center gap-1 text-[10px] font-semibold text-muted-foreground transition hover:text-primary">View trade log <ArrowUpRight size={13} /></button></div>
-                <div className="mt-5 grid grid-cols-[72px_1fr_68px_76px] gap-2 border-b border-border pb-2 mono text-[9px] uppercase tracking-[.1em] text-muted-foreground sm:grid-cols-[82px_1fr_100px_82px_82px] sm:gap-3"><span>Time</span><span>Instrument / setup</span><span className="hidden sm:block">Confidence</span><span className="text-right">P/L</span><span className="hidden text-right sm:block">Result</span></div>
+                 <div className="flex items-center justify-between"><div><div className="flex items-center gap-2"><Clock3 size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Trade history</h2></div><p className="mt-1 text-[11px] text-muted-foreground">Persisted paper executions and outcomes</p></div><span className="mono text-[9px] uppercase tracking-[.1em] text-muted-foreground">SQLite ledger</span></div>
+                 <div className="mt-5 grid grid-cols-[68px_1fr_76px_72px] gap-2 border-b border-border pb-2 mono text-[9px] uppercase tracking-[.1em] text-muted-foreground sm:grid-cols-[92px_1fr_82px_82px_82px_96px_72px] sm:gap-3"><span>Date / time</span><span>Instrument / setup</span><span className="hidden sm:block">Entry</span><span className="hidden sm:block">SL</span><span className="hidden sm:block">TP</span><span className="text-right">P/L</span><span className="hidden text-right sm:block">Result</span></div>
                 <div>{trades.length ? trades.map((trade) => <ActivityRow key={trade.id} trade={trade} />) : <div className="flex flex-col items-center justify-center py-10 text-center"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground"><Activity size={17} /></div><div className="mt-3 text-[12px] font-semibold">No activity yet</div><div className="mt-1 text-[10px] text-muted-foreground">Resume the bot when you are ready to run the simulation.</div></div>}</div>
               </div>
                <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-5">

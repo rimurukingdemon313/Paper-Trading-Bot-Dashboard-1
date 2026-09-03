@@ -58,8 +58,9 @@ function scheduleNext(runCycle: (source: "scheduled") => Promise<unknown>) {
 
 export function startTradingScheduler(
   runCycle: (source: "scheduled") => Promise<unknown>,
+  enabled = true,
 ): void {
-  state.enabled = true;
+  state.enabled = enabled;
   scheduleNext(runCycle);
   logger.info({ nextRunAt: state.nextRunAt }, "Paper trading scheduler started");
 }

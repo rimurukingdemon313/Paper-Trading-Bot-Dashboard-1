@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "sXBG2zq_-kSDOBsemocwN"
+uri = "file://screenshots/paper-trading-dashboard-final.jpg"
+type = "image"
+title = "Paper Trading Dashboard — Final"
+description = "Final responsive dashboard preview showing persisted paper-account metrics, rolling 30-day ROI, dynamic equity chart, autonomous bot console, and expanded trade history."
+logical_id = "aced26c3-8cbd-417f-8f77-a049234a623a"
+content_hash = "sha256:dc97732c41ddc7b63dc7885b8a9c44a3dadd812ccce386f3af3f0f6e28da9094"
+size = 137882
+mtime_ms = 1788420058096
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:08f413d8-45de-408f-ba98-6cfe8374335b/aced26c3-8cbd-417f-8f77-a049234a623a/326d5618-014c-4134-ae6a-e767cc27f2dc"
+storage_version_token = "1788420096045059"
+content_type = "image/jpeg"
