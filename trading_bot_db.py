@@ -358,19 +358,31 @@ def current_state(connection: sqlite3.Connection, limit: int = 50) -> dict[str, 
 
 
 def settle(connection: sqlite3.Connection, payload: Mapping[str, Any]) -> dict[str, Any]:
-    latest_price = as_number(payload.get("latestPrice"))
-    latest_candle = payload.get("latestCandle")
-    if latest_price is None:
-        raise ValueError("latestPrice is required to settle paper positions")
-    if not isinstance(latest_candle, Mapping):
-        latest_candle = {}
-    high = as_number(latest_candle.get("high"), latest_price) or latest_price
-    low = as_number(latest_candle.get("low"), latest_price) or latest_price
+    # payload may be either:
+    #  - legacy single-symbol shape: {"latestPrice": ..., "latestCandle": ...}
+    #  - multi-symbol shape: {"quotes": {"EURUSD": {"latestPrice": ..., "latestCandle": ...}, ...}}
+    quotes: dict[str, Mapping[str, Any]] = {}
+    if isinstance(payload.get("quotes"), Mapping):
+        quotes = dict(payload["quotes"])
+    elif payload.get("latestPrice") is not None:
+        quotes = {"__default__": payload}
+
     closed: list[dict[str, Any]] = []
     rows = connection.execute(
         "SELECT * FROM paper_trades WHERE status = 'OPEN' ORDER BY opened_at ASC"
     ).fetchall()
     for row in rows:
+        quote = quotes.get(row["symbol"], quotes.get("__default__"))
+        if quote is None:
+            continue
+        latest_price = as_number(quote.get("latestPrice"))
+        latest_candle = quote.get("latestCandle")
+        if latest_price is None:
+            continue
+        if not isinstance(latest_candle, Mapping):
+            latest_candle = {}
+        high = as_number(latest_candle.get("high"), latest_price) or latest_price
+        low = as_number(latest_candle.get("low"), latest_price) or latest_price
         side = row["side"]
         stop = float(row["stop_loss"])
         target = float(row["take_profit"])
