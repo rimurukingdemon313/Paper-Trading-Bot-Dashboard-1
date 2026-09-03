@@ -1,8 +1,12 @@
 [providers]
 providers = ["node"]
 
-[pkgs]
-pkgs = ["nodejs", "python3", "python3Packages.pip"]
+[phases.setup]
+nixPkgs = ["nodejs", "python3", "python3Packages.pip"]
 
 [phases.install]
-cmds = ["npm install", "pip install -r requirements.txt --break-system-packages || true"]
+cmds = [
+  "npm install",
+  "pip install -r requirements.txt --break-system-packages",
+  "python3 --version"
+]
