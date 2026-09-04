@@ -15,12 +15,17 @@ from typing import Any, Mapping
 
 
 ACCOUNT_BALANCE = 1000.0
-RISK_PER_TRADE = 0.005
-RISK_AMOUNT = 5.0
+RISK_PER_TRADE = 0.02
 MAX_OPEN_POSITIONS_PER_SYMBOL = 1
 MAX_TOTAL_OPEN_POSITIONS = 6
-MAX_DAILY_LOSS = 20.0
+MAX_DAILY_LOSS_PCT = 0.12
 MIN_RISK_REWARD = 2.0
+
+
+def risk_amount_for_balance(balance: float) -> float:
+    """2% of the current paper balance, rounded to cents."""
+
+    return round(max(balance, 0.0) * RISK_PER_TRADE, 2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +38,8 @@ class TradeProposal:
     take_profit: float | None
     risk_reward_ratio: float | None
     risk_amount: float | None
+    candle_range: float | None = None
+    average_range: float | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "TradeProposal":
@@ -53,6 +60,8 @@ class TradeProposal:
             take_profit=number("take_profit"),
             risk_reward_ratio=number("risk_reward_ratio"),
             risk_amount=number("risk_amount"),
+            candle_range=number("candle_range"),
+            average_range=number("average_range"),
         )
 
 
@@ -75,6 +84,23 @@ class AccountSnapshot:
         if not math.isfinite(balance) or not math.isfinite(daily_pnl):
             raise ValueError("account snapshot values must be finite")
         return cls(balance, daily_pnl, open_positions)
+
+
+VOLATILITY_SPIKE_MULTIPLE = 3.0
+
+
+def is_volatility_spike(candle_range: float | None, average_range: float | None) -> bool:
+    """Flag a candle whose range is a multi-x outlier vs recent average range.
+
+    There is no live economic-calendar feed wired in, so this is the
+    practical proxy: high-impact news (NFP, rate decisions, CPI) reliably
+    produces an M15 candle several times wider than the recent average. When
+    that fires, the engine stands aside rather than trading into the spike.
+    """
+
+    if candle_range is None or average_range is None or average_range <= 0:
+        return False
+    return candle_range >= average_range * VOLATILITY_SPIKE_MULTIPLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,19 +150,30 @@ class RiskEngine:
                 f"Open position limit reached for this symbol "
                 f"({MAX_OPEN_POSITIONS_PER_SYMBOL} maximum)"
             )
-        if snapshot.daily_pnl <= -MAX_DAILY_LOSS:
+        max_daily_loss = round(snapshot.balance * MAX_DAILY_LOSS_PCT, 2)
+        if snapshot.daily_pnl <= -max_daily_loss:
             reasons.append(
                 f"Daily Loss Exceeded: {abs(snapshot.daily_pnl):.2f} is at or above "
-                f"the ${MAX_DAILY_LOSS:.2f} limit"
+                f"the ${max_daily_loss:.2f} limit ({MAX_DAILY_LOSS_PCT * 100:g}% of balance)"
+            )
+        if is_volatility_spike(candidate.candle_range, candidate.average_range):
+            reasons.append(
+                "Volatility spike detected on the latest candle (possible high-impact "
+                f"news); range is {VOLATILITY_SPIKE_MULTIPLE:g}x+ the recent average, "
+                "standing aside"
             )
 
         if candidate.decision in {"BUY", "SELL"}:
+            expected_risk = risk_amount_for_balance(snapshot.balance)
             if candidate.risk_amount is None:
-                reasons.append("Risk amount is missing; exactly $5.00 is required")
-            elif not math.isclose(candidate.risk_amount, RISK_AMOUNT, abs_tol=1e-9):
                 reasons.append(
-                    f"Risk amount ${candidate.risk_amount:.2f} is not exactly "
-                    f"${RISK_AMOUNT:.2f}"
+                    f"Risk amount is missing; expected ${expected_risk:.2f} "
+                    f"({RISK_PER_TRADE * 100:g}% of balance)"
+                )
+            elif not math.isclose(candidate.risk_amount, expected_risk, abs_tol=0.01):
+                reasons.append(
+                    f"Risk amount ${candidate.risk_amount:.2f} does not match the "
+                    f"required ${expected_risk:.2f} ({RISK_PER_TRADE * 100:g}% of balance)"
                 )
 
             if candidate.risk_reward_ratio is None:
@@ -168,12 +205,12 @@ class RiskEngine:
                 )
 
         rules = {
-            "account_balance": ACCOUNT_BALANCE,
+            "account_balance": snapshot.balance,
             "risk_per_trade": RISK_PER_TRADE,
-            "risk_amount": RISK_AMOUNT,
+            "risk_amount": risk_amount_for_balance(snapshot.balance),
             "max_open_positions_per_symbol": MAX_OPEN_POSITIONS_PER_SYMBOL,
             "max_total_open_positions": MAX_TOTAL_OPEN_POSITIONS,
-            "max_daily_loss": MAX_DAILY_LOSS,
+            "max_daily_loss": round(snapshot.balance * MAX_DAILY_LOSS_PCT, 2),
             "min_risk_reward": MIN_RISK_REWARD,
         }
         return RiskDecision(
