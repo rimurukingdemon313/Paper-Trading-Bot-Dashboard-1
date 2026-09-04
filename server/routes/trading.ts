@@ -22,6 +22,9 @@ export const TRADED_SYMBOLS = [
 ] as const;
 export type TradedSymbol = (typeof TRADED_SYMBOLS)[number];
 
+// Must match MAX_TOTAL_OPEN_POSITIONS in risk_engine.py.
+const MAX_TOTAL_OPEN_POSITIONS = 6;
+
 type AccountSnapshot = {
   balance: number;
   dailyPnl: number;
@@ -130,9 +133,22 @@ async function loadSmcAnalysis(symbol: TradedSymbol): Promise<Record<string, unk
   const { stdout } = await execFileAsync(
     "python3",
     [script, "--live", "--symbol", symbol],
-    { cwd: path.dirname(script), maxBuffer: 2 * 1024 * 1024 },
+    { cwd: path.dirname(script), maxBuffer: 2 * 1024 * 1024, timeout: 90_000 },
   );
   const parsed = JSON.parse(stdout) as Record<string, any>;
+  const candles = (parsed.candles ?? []) as Array<{ high: number; low: number }>;
+  const recentRanges = candles
+    .slice(-20)
+    .map((candle) => candle.high - candle.low)
+    .filter((range) => Number.isFinite(range) && range > 0);
+  const averageRange = recentRanges.length
+    ? recentRanges.reduce((sum, range) => sum + range, 0) / recentRanges.length
+    : null;
+  const latestCandle = parsed.latest_candle as { high?: number; low?: number } | undefined;
+  const latestRange =
+    latestCandle && Number.isFinite(latestCandle.high) && Number.isFinite(latestCandle.low)
+      ? (latestCandle.high as number) - (latestCandle.low as number)
+      : null;
   return {
     timeframe: parsed.timeframe,
     symbol: parsed.symbol,
@@ -148,6 +164,9 @@ async function loadSmcAnalysis(symbol: TradedSymbol): Promise<Record<string, unk
     orderBlocks: parsed.order_blocks?.slice(-5) ?? [],
     momentum: parsed.momentum,
     overallContext: parsed.overall_context,
+    multiTimeframe: parsed.multiTimeframe ?? null,
+    candleRange: latestRange,
+    averageRange,
   };
 }
 
@@ -170,14 +189,23 @@ async function askGemini(
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the API server");
 
+  const multiTimeframe = smc.multiTimeframe as
+    | { h4?: { direction?: string }; h1?: { direction?: string }; m15?: { direction?: string }; aligned?: boolean; bias?: string }
+    | null
+    | undefined;
+
   const prompt = [
-    `You are a paper-trading SMC decision analyst for ${symbol}. This is analysis only: never mention broker execution and never assume live market data.`,
-    "Use only the supplied M15 SMC findings. Return JSON only, with no markdown.",
-    "Choose exactly one decision: BUY, SELL, or NO TRADE.",
-    "For BUY or SELL, provide entryPrice, stopLoss, takeProfit, riskRewardRatio, and riskAmount. riskAmount must be exactly 5.",
-    "When evidence is mixed or insufficient, choose NO TRADE. Confidence must be an integer from 0 to 100.",
-    'JSON shape: {"decision":"BUY|SELL|NO TRADE","confidence":0,"reasoning":"detailed evidence-based explanation","entryPrice":0,"stopLoss":0,"takeProfit":0,"riskRewardRatio":0,"riskAmount":5}',
-    `SMC findings for ${symbol}:`,
+    `You are a senior multi-timeframe SMC decision analyst for ${symbol}. This is analysis only: never mention broker execution and never assume live market data.`,
+    "You are given H4 (bias), H1 (confirmation), and M15 (entry) SMC findings under multiTimeframe, plus the full M15 structure detail.",
+    "Require directional alignment: only propose BUY when H4, H1, and M15 bias all agree bullish; only propose SELL when all three agree bearish. If multiTimeframe.aligned is false, or any timeframe disagrees, you must return NO TRADE regardless of how strong the M15 setup looks alone.",
+    "Treat the H4 direction as the dominant trend filter: never trade against the H4 bias even if M15 looks tempting.",
+    "Return JSON only, with no markdown. Choose exactly one decision: BUY, SELL, or NO TRADE.",
+    "For BUY or SELL, provide entryPrice, stopLoss, takeProfit, and riskRewardRatio. Do not invent a riskAmount; the paper-trading server computes position size from account balance.",
+    "When evidence is mixed, conflicting across timeframes, or insufficient, choose NO TRADE. Confidence must be an integer from 0 to 100.",
+    'JSON shape: {"decision":"BUY|SELL|NO TRADE","confidence":0,"reasoning":"detailed evidence-based explanation covering H4/H1/M15 alignment","entryPrice":0,"stopLoss":0,"takeProfit":0,"riskRewardRatio":0}',
+    `Multi-timeframe bias summary for ${symbol}:`,
+    JSON.stringify(multiTimeframe ?? {}),
+    `Full M15 SMC findings for ${symbol}:`,
     JSON.stringify(smc),
   ].join("\n");
 
@@ -220,13 +248,14 @@ async function askGemini(
     stopLoss: finiteOrNull(parsed.stopLoss),
     takeProfit: finiteOrNull(parsed.takeProfit),
     riskRewardRatio: finiteOrNull(parsed.riskRewardRatio),
-    riskAmount: finiteOrNull(parsed.riskAmount),
+    riskAmount: null,
   };
 }
 
 async function runRiskEngine(
   proposal: GeminiDecision,
   account: AccountSnapshot,
+  volatility: { candleRange: number | null; averageRange: number | null },
 ): Promise<RiskDecision> {
   const script = workspaceFile("risk_engine.py");
   const payload = JSON.stringify({
@@ -237,6 +266,8 @@ async function runRiskEngine(
       take_profit: proposal.takeProfit,
       risk_reward_ratio: proposal.riskRewardRatio,
       risk_amount: proposal.riskAmount,
+      candle_range: volatility.candleRange,
+      average_range: volatility.averageRange,
     },
     account: {
       balance: account.balance,
@@ -259,6 +290,12 @@ async function symbolHasOpenPosition(symbol: TradedSymbol): Promise<boolean> {
   );
 }
 
+async function totalOpenPositions(): Promise<number> {
+  const state = await database("state");
+  const trades = (state.trades ?? []) as Array<Record<string, unknown>>;
+  return trades.filter((trade) => trade.result === "OPEN").length;
+}
+
 async function executeSymbolCycle(symbol: TradedSymbol): Promise<{
   result: SymbolCycleResult;
   quote: { latestPrice: unknown; latestCandle: unknown };
@@ -266,14 +303,32 @@ async function executeSymbolCycle(symbol: TradedSymbol): Promise<{
   const smc = await loadSmcAnalysis(symbol);
   const latestCandle = smc.latestCandle as Record<string, unknown> | undefined;
   const hasOpen = await symbolHasOpenPosition(symbol);
+  const totalOpen = await totalOpenPositions();
   const stateNow = await database("state");
   const account = stateNow.account as unknown as AccountSnapshot;
+  // openPositions here is read by risk_engine.py as the per-symbol count; the
+  // total-across-symbols ceiling is enforced separately below because Python
+  // only sees one symbol's snapshot per call.
   const accountForSymbol: AccountSnapshot = {
     ...account,
     openPositions: hasOpen ? 1 : 0,
   };
   const aiDecision = await askGemini(symbol, smc);
-  const risk = await runRiskEngine(aiDecision, accountForSymbol);
+  // 2% of the current paper balance, matching risk_engine.py's
+  // risk_amount_for_balance(). Computed here (not by Gemini) so position
+  // size always reflects the true current balance, including compounding.
+  aiDecision.riskAmount = Math.round(account.balance * 0.02 * 100) / 100;
+  const risk = await runRiskEngine(aiDecision, accountForSymbol, {
+    candleRange: (smc.candleRange as number | null) ?? null,
+    averageRange: (smc.averageRange as number | null) ?? null,
+  });
+  if (risk.approved && totalOpen >= MAX_TOTAL_OPEN_POSITIONS) {
+    risk.approved = false;
+    risk.state = "NO TRADE";
+    risk.reasons = [
+      `Total open position limit reached (${MAX_TOTAL_OPEN_POSITIONS} across all pairs)`,
+    ];
+  }
   const recorded = await database("record-cycle", {
     scan: {
       candleTimestamp: latestCandle?.timestamp,
