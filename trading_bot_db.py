@@ -271,13 +271,16 @@ def serialize_log(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def current_state(connection: sqlite3.Connection, limit: int = 50) -> dict[str, Any]:
-    latest_price_row = connection.execute(
-        "SELECT latest_price FROM scans ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    latest_price = float(latest_price_row["latest_price"]) if latest_price_row else None
     active_row = connection.execute(
         "SELECT * FROM paper_trades WHERE status = 'OPEN' ORDER BY opened_at DESC LIMIT 1"
     ).fetchone()
+    latest_price: float | None = None
+    if active_row is not None:
+        symbol_price_row = connection.execute(
+            "SELECT latest_price FROM scans WHERE symbol = ? ORDER BY id DESC LIMIT 1",
+            (active_row["symbol"],),
+        ).fetchone()
+        latest_price = float(symbol_price_row["latest_price"]) if symbol_price_row else None
     trade_rows = connection.execute(
         """
         SELECT paper_trades.*, COALESCE(ai_decisions.confidence, 0) AS confidence
