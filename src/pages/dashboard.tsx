@@ -139,6 +139,16 @@ type SmcSnapshot = {
   orderBlocks?: unknown[];
 };
 
+type SymbolScanResult = {
+  symbol: string;
+  decision: 'BUY' | 'SELL' | 'NO TRADE';
+  aiDecision: AiDecision;
+  risk: RiskDecision;
+  smc: SmcSnapshot;
+  paperTrade: PaperTrade | null;
+  duplicate: boolean;
+};
+
 const startingAccount: AccountModel = {
   balance: 1000,
   dailyPnl: 0,
@@ -332,6 +342,7 @@ export default function Dashboard() {
   const [riskDecision, setRiskDecision] = useState<RiskDecision>(initialRiskDecision);
   const [openTrade, setOpenTrade] = useState<PaperTrade | null>(null);
   const [smcSnapshot, setSmcSnapshot] = useState<SmcSnapshot | null>(null);
+  const [symbolResults, setSymbolResults] = useState<SymbolScanResult[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showReset, setShowReset] = useState(false);
   const [notice, setNotice] = useState('System nominal');
@@ -441,10 +452,12 @@ export default function Dashboard() {
         risk?: RiskDecision;
         paperTrade?: PaperTrade | null;
         smc?: SmcSnapshot;
+        bySymbol?: SymbolScanResult[];
       };
       if (payload.aiDecision) setAiDecision(payload.aiDecision);
       if (payload.risk) setRiskDecision(payload.risk);
       if (payload.smc) setSmcSnapshot(payload.smc);
+      if (payload.bySymbol) setSymbolResults(payload.bySymbol);
       applyTradingState(payload);
 
       if (!response.ok || !payload.risk) {
@@ -534,6 +547,38 @@ export default function Dashboard() {
               <MetricCard label="Bot status" value={botState === 'running' ? 'Running' : 'Paused'} detail={botState === 'running' ? 'learning in sandbox' : 'no new decisions'} tone={botState === 'running' ? 'positive' : 'neutral'} icon={Bot} testId="bot-status" />
             </section>
 
+            <section className="mt-5 rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-2" data-testid="panel-symbol-scan">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2"><LineChart size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Symbol scan</h2></div>
+                <span className="mono text-[9px] uppercase tracking-[.1em] text-muted-foreground">{symbolResults.length || 6} pairs · M15</span>
+              </div>
+              {symbolResults.length ? (
+                <div className="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+                  {symbolResults.map((entry) => {
+                    const price = entry.smc?.latestPrice;
+                    const decision = entry.decision;
+                    const tone = decision === 'BUY' ? 'text-[#177b69]' : decision === 'SELL' ? 'text-[#c84e3d]' : 'text-muted-foreground';
+                    const badgeTone = decision === 'BUY' ? 'bg-[#177b69]/10 text-[#177b69]' : decision === 'SELL' ? 'bg-[#c84e3d]/10 text-[#c84e3d]' : 'bg-muted text-muted-foreground';
+                    return (
+                      <div key={entry.symbol} className="rounded-lg border border-border bg-background/45 p-3.5" data-testid={`card-symbol-${entry.symbol}`}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[12px] font-semibold">{entry.symbol}</span>
+                          <span className={`rounded-full px-2 py-0.5 mono text-[8px] uppercase tracking-[.08em] ${badgeTone}`}>{decision}</span>
+                        </div>
+                        <div className={`mt-2 mono text-[15px] font-medium ${tone}`}>{typeof price === 'number' ? price.toFixed(price >= 100 ? 2 : 5) : '—'}</div>
+                        <div className="mt-1.5 flex items-center justify-between mono text-[9px] text-muted-foreground">
+                          <span>{entry.aiDecision?.confidence ?? 0}% conf.</span>
+                          <span>{entry.paperTrade ? 'trade opened' : entry.risk?.approved ? 'approved' : 'no trade'}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mt-4 flex min-h-[90px] items-center justify-center rounded-lg border border-dashed border-border bg-background/40 text-[11px] text-muted-foreground">Run AI to scan all tracked pairs</div>
+              )}
+            </section>
+
             <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(300px,.55fr)]">
               <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-2">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -561,26 +606,26 @@ export default function Dashboard() {
                   <div className="flex items-center gap-2 text-[10px] text-primary-foreground/55"><span className="h-1.5 w-1.5 rounded-full bg-accent" /> DECISION LOOP</div>
                    <div className="mt-2 flex items-end justify-between gap-3"><span className="display text-[22px] font-semibold" data-testid="text-ai-decision">{aiDecision.decision}</span><span className="mono text-[10px] text-accent" data-testid="text-gemini-confidence">{aiDecision.confidence}% conf.</span></div>
                    <div className="mt-4 h-1 rounded-full bg-primary-foreground/10"><div className="h-1 rounded-full bg-accent transition-all" style={{ width: `${aiDecision.confidence}%` }} /></div>
-                   <div className="mt-2 flex justify-between gap-3 mono text-[9px] text-primary-foreground/45"><span>GEMINI AI · LIVE EURUSD · M15</span><span>{smcSnapshot?.latestPrice ? `price ${smcSnapshot.latestPrice.toFixed(5)}` : 'waiting for live scan'}</span></div>
+                   <div className="mt-2 flex justify-between gap-3 mono text-[9px] text-primary-foreground/45"><span>GEMINI AI · {symbolResults.length ? `${symbolResults.length} PAIRS` : 'MULTI-PAIR'} · M15</span><span>{smcSnapshot?.latestPrice ? `${smcSnapshot?.symbol ?? ''} ${smcSnapshot.latestPrice.toFixed(5)}` : 'waiting for live scan'}</span></div>
                 </div>
                   <div className="mt-4 rounded-lg border border-border bg-background/45 p-3" data-testid="panel-ai-reasoning">
                     <div className="mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">Trade reasons</div>
                      <p className="mt-1.5 text-[11px] leading-5 text-foreground/80">{aiDecision.reasoning}</p>
-                     <div className="mt-2 border-t border-border/70 pt-2 mono text-[9px] text-muted-foreground">Live EURUSD price: {smcSnapshot?.latestPrice ? smcSnapshot.latestPrice.toFixed(5) : '—'} · {smcSnapshot?.dataSource ?? 'Awaiting live market data'}</div>
+                     <div className="mt-2 border-t border-border/70 pt-2 mono text-[9px] text-muted-foreground">Live {smcSnapshot?.symbol ?? ''} price: {smcSnapshot?.latestPrice ? smcSnapshot.latestPrice.toFixed(5) : '—'} · {smcSnapshot?.dataSource ?? 'Awaiting live market data'}</div>
                   </div>
                   <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2.5 text-[10px] ${riskDecision.approved ? 'bg-[#177b69]/7 text-[#177b69]' : 'bg-[#c84e3d]/7 text-[#c84e3d]'}`} data-testid="status-risk-engine">
                     <ShieldCheck size={14} className="mt-0.5 shrink-0" />
                     <span><strong>{riskDecision.approved ? 'Risk Engine approved' : 'Risk Engine: NO TRADE'}</strong><br />{riskDecision.reasons[0]}</span>
                   </div>
                   <div className="mt-4 space-y-3">
-                   {[['Strategy', 'SMC v2.4 + Gemini'], ['Risk per trade', '$5.00 exactly'], ['Max open positions', '1'], ['Daily loss limit', '$20.00'], ['Minimum RR', '1:2']].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border/60 pb-2.5 text-[11px] last:border-0 last:pb-0"><span className="text-muted-foreground">{label}</span><span className="mono text-[10px] font-medium">{value}</span></div>)}
+                   {[['Strategy', 'SMC v2.4 + Gemini'], ['Risk per trade', '$5.00 exactly'], ['Max open positions', '1 per pair · 6 total'], ['Daily loss limit', '$20.00'], ['Minimum RR', '1:2']].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border/60 pb-2.5 text-[11px] last:border-0 last:pb-0"><span className="text-muted-foreground">{label}</span><span className="mono text-[10px] font-medium">{value}</span></div>)}
                 </div>
                  <div className="mt-5 flex items-center justify-between rounded-lg border border-border bg-background/45 px-3 py-2.5" data-testid="status-smc-engine">
                    <div className="flex items-center gap-2">
                      <span className={`h-2 w-2 rounded-full ${smcState === 'running' ? 'bg-[#177b69] pulse-dot' : 'bg-muted-foreground'}`} />
                      <div>
                        <div className="text-[11px] font-semibold">M15 SMC engine</div>
-                        <div className="mt-0.5 text-[9px] text-muted-foreground">analysis-only · Live EURUSD Data</div>
+                        <div className="mt-0.5 text-[9px] text-muted-foreground">analysis-only · Live multi-pair data</div>
                      </div>
                    </div>
                    <button type="button" onClick={toggleSmc} data-testid="button-toggle-smc" className={`rounded-md px-2.5 py-1.5 mono text-[9px] font-semibold uppercase tracking-[.08em] transition ${smcState === 'running' ? 'bg-[#177b69]/10 text-[#177b69] hover:bg-[#177b69]/15' : 'bg-muted text-muted-foreground hover:text-foreground'}`}>
