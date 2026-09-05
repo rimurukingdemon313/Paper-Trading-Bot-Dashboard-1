@@ -40,6 +40,8 @@ export type GeminiDecision = {
   takeProfit: number | null;
   riskRewardRatio: number | null;
   riskAmount: number | null;
+  aiProvider: "OpenRouter" | "Gemini" | null;
+  aiModel: string | null;
 };
 
 export type RiskDecision = {
@@ -182,24 +184,45 @@ function parseGeminiJson(rawText: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-async function askGemini(
+// DeepSeek (and other chat-style models) often wrap JSON in reasoning text
+// or markdown even when asked not to. Extract the first {...} block instead
+// of assuming the whole response is clean JSON.
+function extractJsonObject(rawText: string): Record<string, unknown> {
+  const withoutFence = rawText
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "");
+  try {
+    const direct = JSON.parse(withoutFence) as unknown;
+    if (direct && typeof direct === "object") return direct as Record<string, unknown>;
+  } catch {
+    // fall through to brace extraction below
+  }
+  const start = withoutFence.indexOf("{");
+  const end = withoutFence.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("No JSON object found in model response");
+  }
+  const candidate = withoutFence.slice(start, end + 1);
+  const parsed = JSON.parse(candidate) as unknown;
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Extracted JSON is not an object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function buildAnalystPrompt(
   symbol: TradedSymbol,
   smc: Record<string, unknown>,
-): Promise<GeminiDecision> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the API server");
-
-  const multiTimeframe = smc.multiTimeframe as
-    | { h4?: { direction?: string }; h1?: { direction?: string }; m15?: { direction?: string }; aligned?: boolean; bias?: string }
-    | null
-    | undefined;
-
-  const prompt = [
+  multiTimeframe: unknown,
+): string {
+  return [
     `You are a senior multi-timeframe SMC decision analyst for ${symbol}. This is analysis only: never mention broker execution and never assume live market data.`,
     "You are given H4 (bias), H1 (confirmation), and M15 (entry) SMC findings under multiTimeframe, plus the full M15 structure detail.",
     "Require directional alignment: only propose BUY when H4, H1, and M15 bias all agree bullish; only propose SELL when all three agree bearish. If multiTimeframe.aligned is false, or any timeframe disagrees, you must return NO TRADE regardless of how strong the M15 setup looks alone.",
     "Treat the H4 direction as the dominant trend filter: never trade against the H4 bias even if M15 looks tempting.",
-    "Return JSON only, with no markdown. Choose exactly one decision: BUY, SELL, or NO TRADE.",
+    "Only propose BUY or SELL when your genuine confidence is 75 or higher. If your honest confidence is below 75, you must return NO TRADE even if direction and structure look reasonable.",
+    "Return JSON only, with no markdown, no reasoning text outside the JSON object. Choose exactly one decision: BUY, SELL, or NO TRADE.",
     "For BUY or SELL, provide entryPrice, stopLoss, takeProfit, and riskRewardRatio. Do not invent a riskAmount; the paper-trading server computes position size from account balance.",
     "When evidence is mixed, conflicting across timeframes, or insufficient, choose NO TRADE. Confidence must be an integer from 0 to 100.",
     'JSON shape: {"decision":"BUY|SELL|NO TRADE","confidence":0,"reasoning":"detailed evidence-based explanation covering H4/H1/M15 alignment","entryPrice":0,"stopLoss":0,"takeProfit":0,"riskRewardRatio":0}',
@@ -208,9 +231,85 @@ async function askGemini(
     `Full M15 SMC findings for ${symbol}:`,
     JSON.stringify(smc),
   ].join("\n");
+}
+
+function decisionFromParsed(
+  parsed: Record<string, unknown>,
+  provider: "OpenRouter" | "Gemini",
+  model: string,
+): GeminiDecision {
+  const decision = String(parsed.decision ?? "NO TRADE").toUpperCase();
+  return {
+    decision: decision === "BUY" || decision === "SELL" ? decision : "NO TRADE",
+    confidence: clampConfidence(parsed.confidence),
+    reasoning: String(parsed.reasoning ?? `${provider} did not provide reasoning.`),
+    entryPrice: finiteOrNull(parsed.entryPrice),
+    stopLoss: finiteOrNull(parsed.stopLoss),
+    takeProfit: finiteOrNull(parsed.takeProfit),
+    riskRewardRatio: finiteOrNull(parsed.riskRewardRatio),
+    riskAmount: null,
+    aiProvider: provider,
+    aiModel: model,
+  };
+}
+
+const OPENROUTER_MODEL = "deepseek/deepseek-r1:free";
+const GEMINI_MODEL = "gemini-2.0-flash";
+
+async function askOpenRouter(
+  symbol: TradedSymbol,
+  smc: Record<string, unknown>,
+  multiTimeframe: unknown,
+): Promise<GeminiDecision> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not configured on the API server");
+
+  const prompt = buildAnalystPrompt(symbol, smc, multiTimeframe);
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: OPENROUTER_MODEL,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.1,
+      max_tokens: 4096,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`OpenRouter request failed (${response.status}): ${detail.slice(0, 240)}`);
+  }
+
+  const body = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const rawText = body.choices?.[0]?.message?.content?.trim();
+  if (!rawText) throw new Error("OpenRouter returned an empty decision");
+
+  const parsed = extractJsonObject(rawText);
+  return decisionFromParsed(parsed, "OpenRouter", OPENROUTER_MODEL);
+}
+
+async function askGemini(
+  symbol: TradedSymbol,
+  smc: Record<string, unknown>,
+): Promise<GeminiDecision> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEYS;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured on the API server");
+
+  const multiTimeframe = smc.multiTimeframe as
+    | { h4?: { direction?: string }; h1?: { direction?: string }; m15?: { direction?: string }; aligned?: boolean; bias?: string }
+    | null
+    | undefined;
+
+  const prompt = buildAnalystPrompt(symbol, smc, multiTimeframe);
 
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
@@ -239,23 +338,39 @@ async function askGemini(
   if (!rawText) throw new Error("Gemini returned an empty decision");
 
   const parsed = parseGeminiJson(rawText);
-  const decision = String(parsed.decision ?? "NO TRADE").toUpperCase();
-  return {
-    decision: decision === "BUY" || decision === "SELL" ? decision : "NO TRADE",
-    confidence: clampConfidence(parsed.confidence),
-    reasoning: String(parsed.reasoning ?? "Gemini did not provide reasoning."),
-    entryPrice: finiteOrNull(parsed.entryPrice),
-    stopLoss: finiteOrNull(parsed.stopLoss),
-    takeProfit: finiteOrNull(parsed.takeProfit),
-    riskRewardRatio: finiteOrNull(parsed.riskRewardRatio),
-    riskAmount: null,
-  };
+  return decisionFromParsed(parsed, "Gemini", GEMINI_MODEL);
+}
+
+// DeepSeek via OpenRouter is the primary analyst; if it errors, is
+// unreachable, or returns something we can't parse, the cycle falls back to
+// Gemini automatically so a scan never silently produces nothing.
+async function askAi(
+  symbol: TradedSymbol,
+  smc: Record<string, unknown>,
+): Promise<GeminiDecision> {
+  const multiTimeframe = smc.multiTimeframe;
+  try {
+    const decision = await askOpenRouter(symbol, smc, multiTimeframe);
+    console.log(
+      `[AI] ${symbol}: analyzed by OpenRouter (${OPENROUTER_MODEL}) -> ${decision.decision}`,
+    );
+    return decision;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown OpenRouter error";
+    console.log(
+      `[AI] ${symbol}: OpenRouter failed (${message}); falling back to Gemini (${GEMINI_MODEL})`,
+    );
+    const decision = await askGemini(symbol, smc);
+    console.log(`[AI] ${symbol}: analyzed by Gemini (${GEMINI_MODEL}) -> ${decision.decision}`);
+    return decision;
+  }
 }
 
 async function runRiskEngine(
   proposal: GeminiDecision,
   account: AccountSnapshot,
   volatility: { candleRange: number | null; averageRange: number | null },
+  symbol: TradedSymbol,
 ): Promise<RiskDecision> {
   const script = workspaceFile("risk_engine.py");
   const payload = JSON.stringify({
@@ -266,8 +381,10 @@ async function runRiskEngine(
       take_profit: proposal.takeProfit,
       risk_reward_ratio: proposal.riskRewardRatio,
       risk_amount: proposal.riskAmount,
+      confidence: proposal.confidence,
       candle_range: volatility.candleRange,
       average_range: volatility.averageRange,
+      symbol,
     },
     account: {
       balance: account.balance,
@@ -278,6 +395,7 @@ async function runRiskEngine(
   const { stdout } = await execFileAsync("python3", [script, payload], {
     cwd: path.dirname(script),
     maxBuffer: 64 * 1024,
+    timeout: 20_000,
   });
   return JSON.parse(stdout) as RiskDecision;
 }
@@ -313,15 +431,20 @@ async function executeSymbolCycle(symbol: TradedSymbol): Promise<{
     ...account,
     openPositions: hasOpen ? 1 : 0,
   };
-  const aiDecision = await askGemini(symbol, smc);
+  const aiDecision = await askAi(symbol, smc);
   // 2% of the current paper balance, matching risk_engine.py's
   // risk_amount_for_balance(). Computed here (not by Gemini) so position
   // size always reflects the true current balance, including compounding.
   aiDecision.riskAmount = Math.round(account.balance * 0.02 * 100) / 100;
-  const risk = await runRiskEngine(aiDecision, accountForSymbol, {
-    candleRange: (smc.candleRange as number | null) ?? null,
-    averageRange: (smc.averageRange as number | null) ?? null,
-  });
+  const risk = await runRiskEngine(
+    aiDecision,
+    accountForSymbol,
+    {
+      candleRange: (smc.candleRange as number | null) ?? null,
+      averageRange: (smc.averageRange as number | null) ?? null,
+    },
+    symbol,
+  );
   if (risk.approved && totalOpen >= MAX_TOTAL_OPEN_POSITIONS) {
     risk.approved = false;
     risk.state = "NO TRADE";
@@ -396,6 +519,8 @@ async function executeTradingCycle(
           takeProfit: null,
           riskRewardRatio: null,
           riskAmount: null,
+          aiProvider: null,
+          aiModel: null,
         },
         risk: {
           approved: false,
