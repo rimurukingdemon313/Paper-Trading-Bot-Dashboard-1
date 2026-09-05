@@ -59,8 +59,11 @@ class Candle:
             raise ValueError("low must be at most as small as open and close")
         if low > high:
             raise ValueError("low must not be greater than high")
-        if timeframe != "M15":
-            raise ValueError(f"SMCAnalyzer only supports M15 candles, got {timeframe}")
+        SUPPORTED_TIMEFRAMES = ("M15", "H1", "H4")
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError(
+                f"SMCAnalyzer supports {', '.join(SUPPORTED_TIMEFRAMES)} candles, got {timeframe}"
+            )
 
         return cls(timestamp, open_price, high, low, close, volume, timeframe)
 
