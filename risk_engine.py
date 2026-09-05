@@ -11,6 +11,7 @@ import json
 import math
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from economic_calendar import news_blackout_for_symbol
@@ -23,6 +24,29 @@ MAX_TOTAL_OPEN_POSITIONS = 6
 MAX_DAILY_LOSS_PCT = 0.12
 MIN_RISK_REWARD = 2.0
 MIN_CONFIDENCE = 75
+
+
+def is_forex_market_closed(now: datetime | None = None) -> bool:
+    """True from Friday 22:00 UTC to Sunday 22:00 UTC (the FX weekend).
+
+    Spot forex trades nearly 24/5 across overlapping global sessions, closing
+    only for the weekend. Friday 22:00 UTC / Sunday 22:00 UTC is the
+    standard approximation (5pm New York close, 5pm New York reopen via the
+    Sydney session) used industry-wide; it can drift by an hour around
+    daylight-saving transitions, which is an acceptable margin for a paper
+    trading safety gate.
+    """
+
+    reference = now or datetime.now(timezone.utc)
+    weekday = reference.weekday()  # Monday=0 ... Sunday=6
+    hour = reference.hour
+    if weekday == 4 and hour >= 22:  # Friday from 22:00 UTC
+        return True
+    if weekday == 5:  # all of Saturday
+        return True
+    if weekday == 6 and hour < 22:  # Sunday before 22:00 UTC
+        return True
+    return False
 
 
 def risk_amount_for_balance(balance: float) -> float:
@@ -146,6 +170,8 @@ class RiskEngine:
         self,
         proposal: TradeProposal | Mapping[str, Any],
         account: AccountSnapshot | Mapping[str, Any],
+        *,
+        now: datetime | None = None,
     ) -> RiskDecision:
         candidate = (
             proposal
@@ -180,6 +206,11 @@ class RiskEngine:
             reasons.append(
                 f"Daily Loss Exceeded: {abs(snapshot.daily_pnl):.2f} is at or above "
                 f"the ${max_daily_loss:.2f} limit ({MAX_DAILY_LOSS_PCT * 100:g}% of balance)"
+            )
+        if is_forex_market_closed(now):
+            reasons.append(
+                "Forex market is closed for the weekend (Fri 22:00 UTC – "
+                "Sun 22:00 UTC); standing aside"
             )
         if is_volatility_spike(candidate.candle_range, candidate.average_range):
             reasons.append(
