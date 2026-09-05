@@ -126,6 +126,25 @@ def initialize(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_setups_scan_id ON smc_setups(scan_id);
         """
     )
+    _migrate_add_ai_provider_columns(connection)
+
+
+def _migrate_add_ai_provider_columns(connection: sqlite3.Connection) -> None:
+    """Add ai_provider/ai_model columns to an existing ai_decisions table.
+
+    Uses ALTER TABLE ADD COLUMN (never DROP/CREATE) so this is safe to run
+    against a database that already has historical rows — nothing is
+    deleted or rewritten, existing trades and decisions are untouched.
+    """
+
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(ai_decisions)").fetchall()
+    }
+    if "ai_provider" not in existing_columns:
+        connection.execute("ALTER TABLE ai_decisions ADD COLUMN ai_provider TEXT")
+    if "ai_model" not in existing_columns:
+        connection.execute("ALTER TABLE ai_decisions ADD COLUMN ai_model TEXT")
 
 
 def as_json(value: Any) -> str:
@@ -330,6 +349,8 @@ def current_state(connection: sqlite3.Connection, limit: int = 50) -> dict[str, 
                 "takeProfit": decision_row["take_profit"],
                 "riskRewardRatio": decision_row["risk_reward_ratio"],
                 "riskAmount": decision_row["risk_amount"],
+                "aiProvider": decision_row["ai_provider"],
+                "aiModel": decision_row["ai_model"],
             }
             if decision_row
             else None
@@ -489,8 +510,8 @@ def record_cycle(connection: sqlite3.Connection, payload: Mapping[str, Any]) -> 
         """
         INSERT INTO ai_decisions
         (scan_id, decision, confidence, reasoning, entry_price, stop_loss, take_profit,
-         risk_reward_ratio, risk_amount, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         risk_reward_ratio, risk_amount, ai_provider, ai_model, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -502,6 +523,8 @@ def record_cycle(connection: sqlite3.Connection, payload: Mapping[str, Any]) -> 
             as_number(ai.get("takeProfit")),
             as_number(ai.get("riskRewardRatio")),
             as_number(ai.get("riskAmount")),
+            ai.get("aiProvider"),
+            ai.get("aiModel"),
             now_iso(),
         ),
     )
