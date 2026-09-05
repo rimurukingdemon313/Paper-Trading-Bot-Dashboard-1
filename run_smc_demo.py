@@ -24,7 +24,7 @@ def _run_single_timeframe(symbol: str, timeframe: str, *, fixture: bool) -> tupl
         data_source = "Yahoo Finance live chart data"
         live = True
 
-    analysis = SMCAnalyzer().analyze(Candle.from_mapping(row) for row in rows)
+    analysis = SMCAnalyzer(timeframe=timeframe).analyze(Candle.from_mapping(row) for row in rows)
     output = analysis.to_dict()
     output.update(
         {
