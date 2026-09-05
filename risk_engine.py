@@ -13,6 +13,8 @@ import sys
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from economic_calendar import news_blackout_for_symbol
+
 
 ACCOUNT_BALANCE = 1000.0
 RISK_PER_TRADE = 0.02
@@ -20,6 +22,7 @@ MAX_OPEN_POSITIONS_PER_SYMBOL = 1
 MAX_TOTAL_OPEN_POSITIONS = 6
 MAX_DAILY_LOSS_PCT = 0.12
 MIN_RISK_REWARD = 2.0
+MIN_CONFIDENCE = 75
 
 
 def risk_amount_for_balance(balance: float) -> float:
@@ -40,6 +43,8 @@ class TradeProposal:
     risk_amount: float | None
     candle_range: float | None = None
     average_range: float | None = None
+    confidence: int | None = None
+    symbol: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "TradeProposal":
@@ -53,6 +58,17 @@ class TradeProposal:
                 raise ValueError(f"{name} must be numeric") from exc
             return result if math.isfinite(result) else None
 
+        confidence_raw = value.get("confidence")
+        confidence = None
+        if confidence_raw is not None and confidence_raw != "":
+            try:
+                confidence = int(round(float(confidence_raw)))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("confidence must be numeric") from exc
+
+        symbol_raw = value.get("symbol")
+        symbol = str(symbol_raw).upper() if symbol_raw else None
+
         return cls(
             decision=str(value.get("decision", "NO TRADE")).upper(),
             entry_price=number("entry_price"),
@@ -62,6 +78,8 @@ class TradeProposal:
             risk_amount=number("risk_amount"),
             candle_range=number("candle_range"),
             average_range=number("average_range"),
+            confidence=confidence,
+            symbol=symbol,
         )
 
 
@@ -143,6 +161,13 @@ class RiskEngine:
 
         if candidate.decision not in {"BUY", "SELL"}:
             reasons.append("AI decision is NO TRADE")
+        if candidate.decision in {"BUY", "SELL"} and (
+            candidate.confidence is None or candidate.confidence < MIN_CONFIDENCE
+        ):
+            shown = "missing" if candidate.confidence is None else f"{candidate.confidence}%"
+            reasons.append(
+                f"Confidence {shown} is below the required {MIN_CONFIDENCE}% minimum"
+            )
         if snapshot.balance <= 0:
             reasons.append("Account balance must be positive")
         if snapshot.open_positions >= MAX_OPEN_POSITIONS_PER_SYMBOL:
@@ -162,6 +187,15 @@ class RiskEngine:
                 f"news); range is {VOLATILITY_SPIKE_MULTIPLE:g}x+ the recent average, "
                 "standing aside"
             )
+        if candidate.symbol:
+            blackout_events = news_blackout_for_symbol(candidate.symbol)
+            if blackout_events:
+                titles = ", ".join(
+                    f"{event.get('country')} {event.get('title')}" for event in blackout_events
+                )
+                reasons.append(
+                    f"High-impact news blackout active for {candidate.symbol}: {titles}"
+                )
 
         if candidate.decision in {"BUY", "SELL"}:
             expected_risk = risk_amount_for_balance(snapshot.balance)
@@ -212,6 +246,7 @@ class RiskEngine:
             "max_total_open_positions": MAX_TOTAL_OPEN_POSITIONS,
             "max_daily_loss": round(snapshot.balance * MAX_DAILY_LOSS_PCT, 2),
             "min_risk_reward": MIN_RISK_REWARD,
+            "min_confidence": MIN_CONFIDENCE,
         }
         return RiskDecision(
             approved=not reasons,
