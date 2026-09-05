@@ -1,29 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  Activity,
-  ArrowDownRight,
-  ArrowUpRight,
-  BarChart3,
-  Bot,
-  BrainCircuit,
-  ChevronDown,
-  CircleHelp,
-  Clock3,
-  Database,
-  Gauge,
-  LineChart,
-  Pause,
-  Play,
-  RotateCcw,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
-  Target,
-  TrendingUp,
-  WalletCards,
-  X,
-  Zap,
-} from 'lucide-react';
+import { Pause, Play, RotateCcw } from 'lucide-react';
 
 type BotState = 'running' | 'paused';
 type EngineState = 'running' | 'paused';
@@ -69,6 +45,8 @@ type AiDecision = {
   takeProfit: number | null;
   riskRewardRatio: number | null;
   riskAmount: number | null;
+  aiProvider?: 'OpenRouter' | 'Gemini' | null;
+  aiModel?: string | null;
 };
 
 type RiskDecision = {
@@ -79,9 +57,11 @@ type RiskDecision = {
     account_balance?: number;
     risk_per_trade?: number;
     risk_amount?: number;
-    max_open_positions?: number;
+    max_open_positions_per_symbol?: number;
+    max_total_open_positions?: number;
     max_daily_loss?: number;
     min_risk_reward?: number;
+    min_confidence?: number;
   };
 };
 
@@ -137,6 +117,13 @@ type SmcSnapshot = {
   structureBreaks?: unknown[];
   fairValueGaps?: unknown[];
   orderBlocks?: unknown[];
+  multiTimeframe?: {
+    h4?: { direction?: string; score?: number; latestPrice?: number };
+    h1?: { direction?: string; score?: number; latestPrice?: number };
+    m15?: { direction?: string; score?: number; latestPrice?: number };
+    aligned?: boolean;
+    bias?: string;
+  } | null;
 };
 
 type SymbolScanResult = {
@@ -168,12 +155,14 @@ const startingTrend = [1000, 1000, 1000, 1000, 1000, 1000];
 const initialAiDecision: AiDecision = {
   decision: 'NO TRADE',
   confidence: 0,
-  reasoning: 'Run Gemini analysis to evaluate the latest M15 SMC evidence.',
+  reasoning: 'Run analysis to evaluate the latest multi-timeframe SMC evidence.',
   entryPrice: null,
   stopLoss: null,
   takeProfit: null,
   riskRewardRatio: null,
   riskAmount: null,
+  aiProvider: null,
+  aiModel: null,
 };
 const initialRiskDecision: RiskDecision = {
   approved: false,
@@ -181,11 +170,13 @@ const initialRiskDecision: RiskDecision = {
   reasons: ['Risk review pending'],
   rules: {
     account_balance: 1000,
-    risk_per_trade: 0.005,
-    risk_amount: 5,
-    max_open_positions: 1,
-    max_daily_loss: 20,
+    risk_per_trade: 0.02,
+    risk_amount: 20,
+    max_open_positions_per_symbol: 1,
+    max_total_open_positions: 6,
+    max_daily_loss: 120,
     min_risk_reward: 2,
+    min_confidence: 75,
   },
 };
 
@@ -196,84 +187,7 @@ const formatDateTime = (value: string | null | undefined) => value
   ? new Date(value).toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short', timeZone: 'UTC' })
   : '—';
 
-function StatusDot({ color = 'bg-[#c8ed45]' }: { color?: string }) {
-  return <span className={`pulse-dot inline-block h-2 w-2 rounded-full ${color}`} aria-hidden="true" />;
-}
-
-function Sidebar() {
-  const nav = [
-    { label: 'Overview', icon: Gauge, active: true },
-    { label: 'Market Data', icon: LineChart },
-    { label: 'SMC Analysis', icon: BarChart3 },
-    { label: 'Gemini AI', icon: BrainCircuit },
-    { label: 'Risk Engine', icon: ShieldCheck },
-    { label: 'Paper Trading', icon: WalletCards },
-    { label: 'Trade Logs', icon: Database },
-  ];
-  return (
-    <aside className="hidden min-h-[100dvh] w-[244px] shrink-0 flex-col bg-sidebar px-4 py-5 text-sidebar-foreground md:flex">
-      <div className="flex items-center gap-3 px-2">
-        <div className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-sidebar-primary text-sidebar-primary-foreground">
-          <Activity size={19} strokeWidth={2.5} />
-        </div>
-        <div>
-          <div className="display text-[17px] font-semibold tracking-[-.03em]">Fieldwork</div>
-          <div className="mono text-[9px] uppercase tracking-[.18em] text-sidebar-foreground/45">paper lab / 01</div>
-        </div>
-      </div>
-
-      <div className="mt-10 px-2 text-[10px] font-semibold uppercase tracking-[.16em] text-sidebar-foreground/35">Command center</div>
-      <nav className="mt-3 space-y-1">
-        {nav.map(({ label, icon: Icon, active }) => (
-          <button
-            key={label}
-            type="button"
-            onClick={() => undefined}
-            data-testid={`button-nav-${label.toLowerCase().replaceAll(' ', '-')}`}
-            className={`group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[12px] transition-colors ${active ? 'bg-sidebar-accent text-sidebar-foreground' : 'text-sidebar-foreground/58 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground'}`}
-          >
-            <Icon size={16} strokeWidth={active ? 2.2 : 1.7} className={active ? 'text-sidebar-primary' : 'text-sidebar-foreground/45 group-hover:text-sidebar-primary'} />
-            <span>{label}</span>
-            {label === 'Paper Trading' && <span className="ml-auto rounded bg-sidebar-primary/15 px-1.5 py-0.5 mono text-[8px] text-sidebar-primary">LIVE SIM</span>}
-          </button>
-        ))}
-      </nav>
-
-      <div className="mt-auto rounded-xl border border-sidebar-border bg-sidebar-accent/45 p-3.5">
-        <div className="flex items-center justify-between">
-          <span className="mono text-[9px] uppercase tracking-[.14em] text-sidebar-foreground/45">Environment</span>
-          <StatusDot />
-        </div>
-        <div className="mt-2 text-[12px] font-medium">Isolated sandbox</div>
-        <div className="mt-1 text-[10px] leading-4 text-sidebar-foreground/45">No broker credentials. No market orders. Ever.</div>
-        <div className="mt-3 border-t border-sidebar-border pt-3">
-          <div className="flex justify-between text-[10px] text-sidebar-foreground/45"><span>Engine uptime</span><span className="mono text-sidebar-foreground/70">04:18:32</span></div>
-        </div>
-      </div>
-      <div className="mt-4 flex items-center gap-2 px-2 text-[10px] text-sidebar-foreground/35">
-        <CircleHelp size={13} />
-        <span>Docs & safety notes</span>
-        <ChevronDown size={12} className="ml-auto" />
-      </div>
-    </aside>
-  );
-}
-
-function MetricCard({ label, value, detail, tone = 'neutral', icon: Icon, testId }: { label: string; value: string; detail: string; tone?: 'positive' | 'negative' | 'neutral'; icon: typeof TrendingUp; testId: string }) {
-  const toneClass = tone === 'positive' ? 'text-[#177b69]' : tone === 'negative' ? 'text-[#c84e3d]' : 'text-foreground';
-  return (
-    <div className="dashboard-in delay-1 group rounded-xl border border-card-border bg-card p-4 shadow-xs transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md" data-testid={`card-${testId}`}>
-      <div className="flex items-start justify-between">
-        <div className="mono text-[10px] uppercase tracking-[.13em] text-muted-foreground">{label}</div>
-        <Icon size={15} className="text-muted-foreground/55 transition-colors group-hover:text-primary" />
-      </div>
-      <div className={`display mt-3 text-[24px] font-semibold tracking-[-.04em] ${toneClass}`} data-testid={`text-${testId}`}>{value}</div>
-      <div className="mt-1 text-[10px] text-muted-foreground" data-testid={`detail-${testId}`}>{detail}</div>
-    </div>
-  );
-}
-
-function TrendChart({ values }: { values: number[] }) {
+function EquityChart({ values }: { values: number[] }) {
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const padding = Math.max(8, (rawMax - rawMin) * 0.18);
@@ -286,47 +200,41 @@ function TrendChart({ values }: { values: number[] }) {
   }).join(' ');
   const areaPoints = `0,100 ${points} 100,100`;
   return (
-    <div className="relative mt-5 h-[218px] w-full overflow-hidden rounded-lg border border-border/70 bg-background/35 px-1 pt-2" data-testid="chart-performance">
-      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between px-3 py-5">
-        {[0, 1, 2, 3].map((line) => <div key={line} className="border-t border-dashed border-border/60" />)}
-      </div>
-       <div className="pointer-events-none absolute right-3 top-3 flex flex-col items-end gap-[48px] mono text-[9px] text-muted-foreground/60">
-         <span>{formatMoney(max)}</span><span>{formatMoney((max + min) / 2)}</span><span>{formatMoney(min)}</span>
-      </div>
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-x-3 bottom-8 top-5 h-[165px] w-[calc(100%-24px)] overflow-visible">
-        <polygon points={areaPoints} fill="hsl(72 77% 57% / .12)" />
-        <polyline points={points} fill="none" stroke="hsl(72 77% 43%)" strokeWidth="1.8" vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx="100" cy={points.split(' ').at(-1)?.split(',')[1]} r="2.2" fill="hsl(72 77% 43%)" vectorEffect="non-scaling-stroke" />
+    <div className="relative mt-4 h-[130px] w-full" data-testid="chart-performance">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full overflow-visible">
+        <polygon points={areaPoints} fill="#00FF41" fillOpacity={0.08} />
+        <polyline points={points} fill="none" stroke="#00FF41" strokeWidth="1.4" vectorEffect="non-scaling-stroke" strokeLinecap="square" strokeLinejoin="miter" />
       </svg>
-      <div className="absolute bottom-2 left-3 right-3 flex justify-between mono text-[9px] text-muted-foreground/65">
-         <span>START</span><span>RECORDED</span><span>NOW</span>
-      </div>
     </div>
   );
 }
 
-function ActivityRow({ trade }: { trade: Trade }) {
+function Stat({ label, value, tone, testId }: { label: string; value: string; tone: 'positive' | 'negative' | 'neutral'; testId: string }) {
+  const toneClass = tone === 'positive' ? 'text-term-bright' : tone === 'negative' ? 'text-term-amber' : 'text-term-dim';
+  return (
+    <div data-testid={`card-${testId}`}>
+      <div className="term-mono text-[9px] text-term-dim">{label}</div>
+      <div className={`term-digits mt-1 text-[16px] font-medium ${toneClass}`} data-testid={`text-${testId}`}>{value}</div>
+    </div>
+  );
+}
+
+function LogRow({ trade }: { trade: Trade }) {
   const isWin = trade.result === 'WIN';
   const isOpen = trade.result === 'OPEN';
-  const isRejected = trade.result === 'REJECTED';
+  const textTone = isWin ? 'text-term-bright' : isOpen ? 'text-term-dim' : 'text-term-amber';
   return (
-    <div className="grid grid-cols-[68px_1fr_76px_72px] items-center gap-2 border-b border-border/60 py-3 last:border-0 sm:grid-cols-[92px_1fr_82px_82px_82px_96px_72px] sm:gap-3" data-testid={`row-trade-${trade.id}`}>
-      <div className="mono text-[10px] text-muted-foreground">{formatDateTime(trade.time)}</div>
+    <div className="grid grid-cols-[70px_1fr_80px] items-center gap-2 border-b border-term-line/40 py-2.5 last:border-0 sm:grid-cols-[80px_1fr_90px_90px]" data-testid={`row-trade-${trade.id}`}>
+      <div className="term-mono text-[9px] text-term-dim">{formatDateTime(trade.time)}</div>
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-[12px] font-semibold">{trade.symbol}</span>
-          <span className={`rounded px-1.5 py-0.5 mono text-[8px] font-medium ${trade.side === 'LONG' ? 'bg-[#177b69]/10 text-[#177b69]' : 'bg-[#c84e3d]/10 text-[#c84e3d]'}`}>{trade.side}</span>
+          <span className="term-mono text-[12px] font-medium text-term-fg">{trade.symbol}</span>
+          <span className={`term-mono text-[8px] ${trade.side === 'LONG' ? 'text-term-bright' : 'text-term-amber'}`}>{trade.side === 'LONG' ? '[+]' : '[-]'}</span>
         </div>
-        <div className="mt-0.5 truncate text-[10px] text-muted-foreground">{trade.setup}</div>
+        <div className="mt-0.5 truncate term-mono text-[9px] text-term-dim">{trade.setup}</div>
       </div>
-      <div className="hidden mono text-[10px] text-muted-foreground sm:block">{trade.entryPrice?.toFixed(5) ?? '—'}</div>
-      <div className="hidden mono text-[10px] text-muted-foreground sm:block">{trade.stopLoss?.toFixed(5) ?? '—'}</div>
-      <div className="hidden mono text-[10px] text-muted-foreground sm:block">{trade.takeProfit?.toFixed(5) ?? '—'}</div>
-      <div className={`text-right ${isWin ? 'text-[#177b69]' : isOpen ? 'text-muted-foreground' : 'text-[#c84e3d]'}`}>
-        <div className="mono text-[11px] font-medium">{isWin ? '+' : ''}{formatMoney(trade.pnl)}</div>
-        <div className="mono mt-0.5 text-[9px] opacity-70">{trade.pnlPct >= 0 ? '+' : ''}{formatPct(trade.pnlPct)}</div>
-      </div>
-      <div className={`hidden justify-self-end rounded-full border px-2 py-1 mono text-[8px] uppercase tracking-[.08em] sm:block ${isWin ? 'border-[#177b69]/25 bg-[#177b69]/7 text-[#177b69]' : isOpen ? 'border-border bg-muted text-muted-foreground' : isRejected ? 'border-[#c84e3d]/25 bg-[#c84e3d]/7 text-[#c84e3d]' : 'border-[#c84e3d]/25 bg-[#c84e3d]/7 text-[#c84e3d]'}`}>{trade.result}</div>
+      <div className={`text-right term-digits text-[13px] font-medium ${textTone}`}>{isWin ? '+' : ''}{formatMoney(trade.pnl)}</div>
+      <div className="hidden text-right term-mono text-[9px] text-term-dim sm:block">{trade.result}</div>
     </div>
   );
 }
@@ -346,6 +254,12 @@ export default function Dashboard() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showReset, setShowReset] = useState(false);
   const [notice, setNotice] = useState('System nominal');
+  const [clock, setClock] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const clockLabel = clock.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' });
   const winRate = useMemo(() => account.trades ? (account.wins / account.trades) * 100 : 0, [account.trades, account.wins]);
 
   const applyTradingState = useCallback((payload: TradingState) => {
@@ -358,7 +272,6 @@ export default function Dashboard() {
     if (payload.latestScan) {
       setSmcSnapshot((current) => ({
         ...current,
-        symbol: 'EURUSD',
         live: payload.latestScan?.live,
         latestPrice: payload.latestScan?.latestPrice,
         dataSource: payload.latestScan?.dataSource,
@@ -387,7 +300,7 @@ export default function Dashboard() {
 
   const toggleBot = async () => {
     const enabled = botState === 'paused';
-    setNotice(enabled ? 'Resuming automatic M15 scans…' : 'Pausing automatic scans safely…');
+    setNotice(enabled ? 'Resuming automatic scans…' : 'Pausing automatic scans safely…');
     try {
       const response = await fetch('/api/trading/scheduler', {
         method: 'POST',
@@ -398,7 +311,7 @@ export default function Dashboard() {
       if (!response.ok || !payload.scheduler) throw new Error(payload.error ?? 'Scheduler update failed');
       setScheduler(payload.scheduler);
       setBotState(payload.scheduler.enabled ? 'running' : 'paused');
-      setNotice(enabled ? 'Automatic M15 scans resumed' : 'Automatic scans paused safely');
+      setNotice(enabled ? 'Automatic scans resumed' : 'Automatic scans paused safely');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Unable to update scheduler');
     }
@@ -407,7 +320,7 @@ export default function Dashboard() {
   const toggleSmc = () => {
     setSmcState((current) => {
       const next = current === 'running' ? 'paused' : 'running';
-      setNotice(next === 'running' ? 'M15 SMC analysis resumed' : 'M15 SMC analysis paused safely');
+      setNotice(next === 'running' ? 'Multi-timeframe SMC analysis resumed' : 'SMC analysis paused safely');
       return next;
     });
   };
@@ -436,11 +349,11 @@ export default function Dashboard() {
       return;
     }
     if (smcState === 'paused') {
-      setNotice('Resume M15 SMC analysis before requesting an AI decision');
+      setNotice('Resume SMC analysis before requesting an AI decision');
       return;
     }
     setIsAnalyzing(true);
-    setNotice('Running M15 SMC analysis and Gemini review…');
+    setNotice('Running multi-timeframe SMC analysis…');
     try {
       const response = await fetch('/api/trading/analyze', {
         method: 'POST',
@@ -466,7 +379,7 @@ export default function Dashboard() {
       }
 
       if (payload.paperTrade && payload.risk.approved) {
-        setNotice(`Approved ${payload.paperTrade.side}: paper trade logged at $5 risk`);
+        setNotice(`Approved ${payload.paperTrade.side}: paper trade logged`);
       } else {
         const reason = payload.risk.reasons[0] ?? 'Risk Engine rejected the proposal';
         setNotice(`NO TRADE — ${reason}`);
@@ -480,202 +393,226 @@ export default function Dashboard() {
     }
   };
 
+  const biasDirection = smcSnapshot?.multiTimeframe?.bias ?? smcSnapshot?.multiTimeframe?.h4?.direction;
+  const timeframesAligned = smcSnapshot?.multiTimeframe?.aligned;
+  const providerLabel = aiDecision.aiProvider === 'OpenRouter' ? 'DEEPSEEK-R1' : aiDecision.aiProvider === 'Gemini' ? 'GEMINI' : null;
+
   return (
-    <div className="noise min-h-[100dvh] bg-background text-foreground">
-      <div className="flex min-h-[100dvh]">
-        <Sidebar />
-        <main className="min-w-0 flex-1">
-          <header className="sticky top-0 z-20 border-b border-border/80 bg-background/90 backdrop-blur-md">
-            <div className="flex min-h-[70px] items-center justify-between gap-4 px-5 py-3 sm:px-8 lg:px-10">
+    <div className="term-bg term-scanlines min-h-[100dvh] text-term-fg">
+      <div className="mx-auto flex min-h-[100dvh] max-w-[1200px] flex-col">
+        <header className="border-b border-term-line px-5 py-4 sm:px-8">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <span className="term-mono text-[14px] text-term-bright">&gt;</span>
+              <div className="term-mono text-[14px] font-medium tracking-tight text-term-bright">SIXPAIR_CONFLUENCE.SYS</div>
+              <span className="term-cursor term-mono text-[14px] text-term-bright">_</span>
+            </div>
+            <div className="term-digits text-[20px] tracking-[.06em] text-term-bright" data-testid="text-clock" aria-label="UTC time">{clockLabel}<span className="text-term-dim"> UTC</span></div>
+            <div className="flex items-center gap-3">
+              <span className="term-mono flex items-center gap-1.5 border border-term-line px-2 py-1 text-[10px] text-term-dim" data-testid="status-paper-only">
+                <span className="term-blink inline-block h-1.5 w-1.5 bg-term-bright" /> PAPER_MODE
+              </span>
+              <button
+                type="button"
+                onClick={() => void toggleBot()}
+                data-testid="button-toggle-bot"
+                className="term-mono flex items-center gap-1.5 border border-term-line px-3 py-1.5 text-[10px] text-term-bright transition-colors hover:bg-term-bright/10"
+              >
+                {botState === 'running' ? <Pause size={11} /> : <Play size={11} />}
+                {botState === 'running' ? 'PAUSE' : 'RESUME'}
+              </button>
+            </div>
+          </div>
+          {notice && (
+            <div className="term-mono mt-3 text-[11px] text-term-dim" data-testid="text-notice">&gt; {notice}</div>
+          )}
+        </header>
+
+        <main className="flex-1 px-5 py-6 sm:px-8">
+          {/* Bias hero */}
+          <section className="border border-term-line bg-term-panel p-6 sm:p-8" data-testid="panel-bias-hero">
+            <div className="flex flex-wrap items-start justify-between gap-6">
               <div>
+                <div className="term-mono text-[10px] text-term-dim">BIAS// H4_TREND_FILTER</div>
+                <div className={`term-mono mt-2 text-[38px] font-bold uppercase leading-none tracking-tight sm:text-[48px] ${biasDirection === 'bullish' ? 'text-term-bright' : biasDirection === 'bearish' ? 'text-term-amber' : 'text-term-dim'}`} data-testid="text-bias-direction">
+                  {biasDirection ? biasDirection.toUpperCase() : 'STANDBY'}
+                </div>
+                <div className="term-mono mt-3 flex items-center gap-2 text-[11px] text-term-dim">
+                  {timeframesAligned === true && <span className="text-term-bright">[OK] H4=H1=M15 ALIGNED</span>}
+                  {timeframesAligned === false && <span className="text-term-amber">[!!] TIMEFRAME CONFLICT — STANDING ASIDE</span>}
+                  {timeframesAligned === undefined && <span>[..] AWAITING SCAN</span>}
+                </div>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <div className="term-mono text-[10px] text-term-dim">DECISION//</div>
                 <div className="flex items-center gap-2">
-                  <span className="h-1.5 w-1.5 rounded-full bg-[#177b69]" />
-                  <span className="mono text-[10px] uppercase tracking-[.15em] text-muted-foreground">Wednesday, 22 May 2024</span>
+                  <span className={`term-mono text-[22px] font-bold ${aiDecision.decision === 'BUY' ? 'text-term-bright' : aiDecision.decision === 'SELL' ? 'text-term-amber' : 'text-term-dim'}`} data-testid="text-ai-decision">{aiDecision.decision}</span>
+                  <span className="term-digits text-[11px] text-term-amber" data-testid="text-gemini-confidence">{aiDecision.confidence}%</span>
                 </div>
-                <h1 className="display mt-1 text-[23px] font-semibold tracking-[-.045em] sm:text-[26px]">Overview</h1>
-              </div>
-              <div className="flex items-center gap-2 sm:gap-3">
-                <div className="hidden items-center gap-2 rounded-full border border-[#177b69]/20 bg-[#177b69]/7 px-3 py-2 sm:flex" data-testid="status-paper-only">
-                  <ShieldCheck size={14} className="text-[#177b69]" />
-                  <span className="text-[11px] font-semibold text-[#177b69]">PAPER TRADING ONLY</span>
-                </div>
-                <div className="hidden h-9 w-9 items-center justify-center rounded-full bg-primary display text-[13px] font-semibold text-primary-foreground sm:flex" data-testid="avatar-user">AR</div>
+                {providerLabel && (
+                  <span className="term-mono text-[9px] text-term-dim" data-testid="badge-ai-provider" title={aiDecision.aiModel ?? undefined}>[{providerLabel}]</span>
+                )}
               </div>
             </div>
-          </header>
 
-          <div className="mx-auto max-w-[1500px] px-5 pb-12 pt-6 sm:px-8 lg:px-10">
-            <div className="mb-5 flex items-center gap-2 rounded-lg border border-[#d77a2e]/25 bg-[#d77a2e]/7 px-3 py-2.5 text-[11px] text-[#8f531d] dashboard-in" data-testid="banner-simulation">
-              <Zap size={14} className="shrink-0" />
-              <span><strong>Sandbox active.</strong> All values are simulated with virtual funds. This workspace cannot connect to a broker or place live orders.</span>
-              <button type="button" onClick={() => setNotice('Safety policy: broker connection disabled')} data-testid="button-safety-info" className="ml-auto shrink-0 underline decoration-[#d77a2e]/40 underline-offset-2 hover:text-foreground">Safety policy</button>
+            <div className="mt-6 grid grid-cols-3 gap-px border-t border-term-line bg-term-line pt-px">
+              {(['h4', 'h1', 'm15'] as const).map((tf) => {
+                const entry = smcSnapshot?.multiTimeframe?.[tf];
+                const dir = entry?.direction;
+                return (
+                  <div key={tf} className="bg-term-panel px-3 py-2.5">
+                    <div className="term-mono text-[9px] text-term-dim">{tf.toUpperCase()}</div>
+                    <div className={`term-mono mt-1 text-[13px] font-medium uppercase ${dir === 'bullish' ? 'text-term-bright' : dir === 'bearish' ? 'text-term-amber' : 'text-term-dim'}`}>{dir ?? '--'}</div>
+                  </div>
+                );
+              })}
             </div>
 
-            <section className="grid-paper relative overflow-hidden rounded-2xl border border-primary/20 bg-primary px-5 py-5 text-primary-foreground shadow-md sm:px-7 sm:py-6 dashboard-in" data-testid="card-account-summary">
-              <div className="pointer-events-none absolute -right-10 -top-16 h-48 w-48 rounded-full border-[24px] border-accent/10" />
-              <div className="pointer-events-none absolute -bottom-24 right-36 h-48 w-48 rounded-full border border-accent/10" />
-              <div className="relative flex flex-col justify-between gap-5 md:flex-row md:items-end">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="mono text-[10px] uppercase tracking-[.16em] text-primary-foreground/55">Paper account balance</span>
-                    <span className="rounded border border-accent/30 bg-accent/15 px-1.5 py-0.5 mono text-[8px] uppercase tracking-[.08em] text-accent">virtual USD</span>
-                  </div>
-                  <div className="display mt-2 text-[38px] font-semibold tracking-[-.06em] sm:text-[46px]" data-testid="text-balance">{formatMoney(account.balance)}</div>
-                   <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-primary-foreground/60">
-                     <span className="inline-flex items-center gap-1 text-accent"><ArrowUpRight size={13} /> {formatMoney(account.balance - 1000)}</span>
-                     <span className="mono text-accent">({account.balance >= 1000 ? '+' : ''}{formatPct(((account.balance - 1000) / 1000) * 100)})</span>
-                    <span>since paper account start</span>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-6 border-t border-primary-foreground/12 pt-4 md:min-w-[310px] md:border-l md:border-t-0 md:pl-6 md:pt-0">
-                  <div><div className="mono text-[9px] uppercase tracking-[.13em] text-primary-foreground/45">Starting capital</div><div className="mt-1 mono text-[15px]">$1,000.00</div></div>
-                  <div><div className="mono text-[9px] uppercase tracking-[.13em] text-primary-foreground/45">Account state</div><div className="mt-1 flex items-center gap-1.5 text-[12px]"><StatusDot /><span>Isolated sandbox</span></div></div>
-                </div>
+            <div className="mt-5 border border-term-line bg-term-bg/60 p-4" data-testid="panel-ai-reasoning">
+              <p className="term-mono text-[11px] leading-6 text-term-fg/80">&gt; {aiDecision.reasoning}</p>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-term-line pt-3 term-mono text-[9px] text-term-dim">
+                <span>{smcSnapshot?.dataSource ?? 'AWAITING_LIVE_FEED'}</span>
+                <span>{smcSnapshot?.latestPrice ? `${smcSnapshot?.symbol ?? ''} ${smcSnapshot.latestPrice.toFixed(5)}` : '--'}</span>
               </div>
-            </section>
+            </div>
 
-             <section className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-10">
-               <MetricCard label="Total P/L" value={formatSignedMoney(account.balance - 1000)} detail="since paper account start" tone={account.balance >= 1000 ? 'positive' : 'negative'} icon={TrendingUp} testId="total-pnl" />
-               <MetricCard label="Daily P/L" value={formatSignedMoney(account.dailyPnl)} detail="max loss $20.00" tone={account.dailyPnl < 0 ? 'negative' : 'positive'} icon={ArrowUpRight} testId="daily-pnl" />
-               <MetricCard label="Monthly P/L" value={formatSignedMoney(account.monthlyPnl)} detail="paper account" tone={account.monthlyPnl < 0 ? 'negative' : 'positive'} icon={TrendingUp} testId="monthly-pnl" />
-               <MetricCard label="Trades executed" value={String(account.trades)} detail="all simulated" icon={Activity} testId="trades" />
-              <MetricCard label="Wins" value={String(account.wins)} detail={`${formatPct(winRate)} of trades`} tone="positive" icon={Target} testId="wins" />
-              <MetricCard label="Losses" value={String(account.losses)} detail="risk contained" tone="negative" icon={ArrowDownRight} testId="losses" />
-              <MetricCard label="Win rate" value={formatPct(winRate)} detail="target ≥ 55.0%" tone="positive" icon={Sparkles} testId="win-rate" />
-               <MetricCard label="Max drawdown" value={formatPct(account.drawdown)} detail="from account peak" tone="neutral" icon={BarChart3} testId="drawdown" />
-               <MetricCard label="Open trade" value={openTrade ? '1' : '0'} detail="max 1 permitted" tone={openTrade ? 'positive' : 'neutral'} icon={WalletCards} testId="open-trades" />
-              <MetricCard label="Bot status" value={botState === 'running' ? 'Running' : 'Paused'} detail={botState === 'running' ? 'learning in sandbox' : 'no new decisions'} tone={botState === 'running' ? 'positive' : 'neutral'} icon={Bot} testId="bot-status" />
-            </section>
+            <div className="mt-5 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => void runAiDecision()}
+                disabled={isAnalyzing}
+                data-testid="button-run-ai"
+                className="term-mono flex items-center justify-center gap-2 border border-term-bright bg-term-bright/10 px-5 py-2.5 text-[12px] font-medium text-term-bright transition hover:bg-term-bright/20 disabled:cursor-wait disabled:opacity-50"
+              >
+                {isAnalyzing ? '> SCANNING...' : '> RUN_SCAN'}
+              </button>
+              <button
+                type="button"
+                onClick={toggleSmc}
+                data-testid="button-toggle-smc"
+                className="term-mono flex items-center gap-2 border border-term-line px-4 py-2.5 text-[12px] text-term-dim transition hover:border-term-bright/50 hover:text-term-bright"
+              >
+                {smcState === 'running' ? <Pause size={13} /> : <Play size={13} />}
+                {smcState === 'running' ? 'PAUSE_SMC' : 'RESUME_SMC'}
+              </button>
+            </div>
+          </section>
 
-            <section className="mt-5 rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-2" data-testid="panel-symbol-scan">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2"><LineChart size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Symbol scan</h2></div>
-                <span className="mono text-[9px] uppercase tracking-[.1em] text-muted-foreground">{symbolResults.length || 6} pairs · M15</span>
-              </div>
-              {symbolResults.length ? (
-                <div className="mt-4 grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
-                  {symbolResults.map((entry) => {
-                    const price = entry.smc?.latestPrice;
-                    const decision = entry.decision;
-                    const tone = decision === 'BUY' ? 'text-[#177b69]' : decision === 'SELL' ? 'text-[#c84e3d]' : 'text-muted-foreground';
-                    const badgeTone = decision === 'BUY' ? 'bg-[#177b69]/10 text-[#177b69]' : decision === 'SELL' ? 'bg-[#c84e3d]/10 text-[#c84e3d]' : 'bg-muted text-muted-foreground';
-                    return (
-                      <div key={entry.symbol} className="rounded-lg border border-border bg-background/45 p-3.5" data-testid={`card-symbol-${entry.symbol}`}>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[12px] font-semibold">{entry.symbol}</span>
-                          <span className={`rounded-full px-2 py-0.5 mono text-[8px] uppercase tracking-[.08em] ${badgeTone}`}>{decision}</span>
-                        </div>
-                        <div className={`mt-2 mono text-[15px] font-medium ${tone}`}>{typeof price === 'number' ? price.toFixed(price >= 100 ? 2 : 5) : '—'}</div>
-                        <div className="mt-1.5 flex items-center justify-between mono text-[9px] text-muted-foreground">
-                          <span>{entry.aiDecision?.confidence ?? 0}% conf.</span>
-                          <span>{entry.paperTrade ? 'trade opened' : entry.risk?.approved ? 'approved' : 'no trade'}</span>
-                        </div>
+          {/* Pair grid */}
+          <section className="mt-6" data-testid="panel-symbol-scan">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="term-mono text-[13px] font-medium text-term-bright">PAIR_SCAN//</div>
+              <span className="term-mono text-[10px] text-term-dim">{symbolResults.length || 6} TRACKED</span>
+            </div>
+            {symbolResults.length ? (
+              <div className="grid grid-cols-2 gap-px bg-term-line sm:grid-cols-3">
+                {symbolResults.map((entry) => {
+                  const price = entry.smc?.latestPrice;
+                  const decision = entry.decision;
+                  const textTone = decision === 'BUY' ? 'text-term-bright' : decision === 'SELL' ? 'text-term-amber' : 'text-term-dim';
+                  return (
+                    <div key={entry.symbol} className="bg-term-panel px-3.5 py-3" data-testid={`card-symbol-${entry.symbol}`}>
+                      <div className="flex items-center justify-between">
+                        <span className="term-mono text-[12px] font-medium text-term-fg">{entry.symbol}</span>
+                        <span className={`term-mono text-[9px] ${textTone}`}>{decision}</span>
                       </div>
-                    );
-                  })}
+                      <div className="term-digits mt-1.5 text-[16px] font-medium text-term-bright">{typeof price === 'number' ? price.toFixed(price >= 100 ? 2 : 5) : '--'}</div>
+                      <div className="term-mono mt-1 flex items-center justify-between text-[9px] text-term-dim">
+                        <span>{entry.aiDecision?.confidence ?? 0}%</span>
+                        <span>{entry.paperTrade ? 'OPEN' : entry.risk?.approved ? 'OK' : 'HOLD'}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="term-mono flex min-h-[90px] items-center justify-center border border-dashed border-term-line text-[11px] text-term-dim">RUN_SCAN TO POPULATE PAIRS</div>
+            )}
+          </section>
+
+          {/* Position + performance */}
+          <div className="mt-6 grid gap-px bg-term-line lg:grid-cols-[1fr_300px]">
+            <section className="bg-term-panel p-5" data-testid="panel-equity">
+              <div className="flex items-center justify-between">
+                <div className="term-mono text-[13px] font-medium text-term-bright">EQUITY_CURVE//</div>
+                <span className="term-mono text-[10px] text-term-dim">SIM_FUNDS</span>
+              </div>
+              <EquityChart values={trend} />
+              <div className="mt-4 grid grid-cols-3 gap-3 border-t border-term-line pt-4">
+                <Stat label="TOTAL_PNL" value={formatSignedMoney(account.pnl30d)} tone={account.pnl30d >= 0 ? 'positive' : 'negative'} testId="total-pnl" />
+                <Stat label="WIN_RATE" value={formatPct(winRate)} tone="neutral" testId="win-rate" />
+                <Stat label="DRAWDOWN" value={formatPct(account.drawdown)} tone={account.drawdown > 5 ? 'negative' : 'neutral'} testId="drawdown" />
+              </div>
+            </section>
+
+            <section className="bg-term-panel p-5" data-testid="panel-position">
+              <div className="flex items-center justify-between">
+                <div className="term-mono text-[13px] font-medium text-term-bright">POSITION//</div>
+                <span className={`term-mono text-[9px] ${openTrade ? 'text-term-amber' : 'text-term-dim'}`}>{openTrade ? 'OPEN' : 'FLAT'}</span>
+              </div>
+              {openTrade ? (
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="term-mono text-[14px] font-medium text-term-fg">{openTrade.symbol}</span>
+                    <span className={`term-digits text-[15px] font-medium ${(openTrade.unrealizedPnl ?? 0) >= 0 ? 'text-term-bright' : 'text-term-amber'}`}>{formatSignedMoney(openTrade.unrealizedPnl ?? 0)}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 term-mono text-[10px] text-term-dim">
+                    <div><div>ENTRY</div><div className="term-digits mt-0.5 text-[13px] text-term-fg">{openTrade.entryPrice.toFixed(5)}</div></div>
+                    <div><div>STOP</div><div className="term-digits mt-0.5 text-[13px] text-term-fg">{openTrade.stopLoss.toFixed(5)}</div></div>
+                    <div><div>TARGET</div><div className="term-digits mt-0.5 text-[13px] text-term-fg">{openTrade.takeProfit.toFixed(5)}</div></div>
+                  </div>
                 </div>
               ) : (
-                <div className="mt-4 flex min-h-[90px] items-center justify-center rounded-lg border border-dashed border-border bg-background/40 text-[11px] text-muted-foreground">Run AI to scan all tracked pairs</div>
+                <div className="term-mono mt-8 flex flex-col items-center gap-2 text-center text-[11px] text-term-dim">
+                  <span>[ NO_ACTIVE_TRADE ]</span>
+                </div>
               )}
-            </section>
-
-            <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(300px,.55fr)]">
-              <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-2">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div><div className="flex items-center gap-2"><LineChart size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Simulated performance</h2></div><p className="mt-1 text-[11px] text-muted-foreground">Account equity · virtual funds only</p></div>
-                  <div className="flex rounded-lg border border-border bg-background p-0.5 mono text-[9px] text-muted-foreground"><button type="button" onClick={() => setNotice('Showing 30 day simulation')} data-testid="button-range-30d" className="rounded-md bg-primary px-2.5 py-1.5 text-primary-foreground">30D</button><button type="button" onClick={() => setNotice('Showing all simulation history')} data-testid="button-range-all" className="px-2.5 py-1.5 hover:text-foreground">ALL</button></div>
+              <div className="mt-5 border-t border-term-line pt-4">
+                <div className="term-mono text-[9px] text-term-dim">RISK_GATE//</div>
+                <div className="term-mono mt-2 space-y-1.5 text-[10px] text-term-dim">
+                  <div className="flex justify-between"><span>RISK/TRADE</span><span className="text-term-fg">{((riskDecision.rules.risk_per_trade ?? 0.02) * 100).toFixed(0)}%</span></div>
+                  <div className="flex justify-between"><span>MIN_CONF</span><span className="text-term-fg">{riskDecision.rules.min_confidence ?? 75}%</span></div>
+                  <div className="flex justify-between"><span>MIN_R:R</span><span className="text-term-fg">1:{riskDecision.rules.min_risk_reward ?? 2}</span></div>
+                  <div className="flex justify-between"><span>MAX_POS</span><span className="text-term-fg">{riskDecision.rules.max_open_positions_per_symbol ?? 1}/PAIR·{riskDecision.rules.max_total_open_positions ?? 6}</span></div>
                 </div>
-                <TrendChart values={trend} />
-                 <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[10px] text-muted-foreground"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-accent" /> equity curve</span><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#d77a2e]" /> starting capital</span><span className="ml-auto mono text-[9px]">PERSISTED IN SQLITE</span></div>
-                 <div className="mt-5 rounded-xl border border-primary/15 bg-primary/[.035] p-4" data-testid="monthly-performance-summary">
-                   <div className="flex items-center justify-between gap-3">
-                     <div><div className="mono text-[9px] uppercase tracking-[.14em] text-muted-foreground">Monthly performance summary</div><div className="mt-1 text-[11px] text-muted-foreground">Rolling 30-day results</div></div>
-                     <div className={`mono text-[22px] font-semibold ${account.roi30d >= 0 ? 'text-[#177b69]' : 'text-[#c84e3d]'}`}>{account.roi30d >= 0 ? '+' : ''}{formatPct(account.roi30d)} <span className="text-[10px] font-normal text-muted-foreground">ROI</span></div>
-                   </div>
-                   <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border/70 pt-3">
-                     <div><div className="mono text-[9px] text-muted-foreground">30-day P/L</div><div className="mt-1 mono text-[11px] font-medium">{formatSignedMoney(account.pnl30d)}</div></div>
-                     <div><div className="mono text-[9px] text-muted-foreground">Wins</div><div className="mt-1 mono text-[11px] font-medium">{account.wins}</div></div>
-                     <div><div className="mono text-[9px] text-muted-foreground">Trades</div><div className="mt-1 mono text-[11px] font-medium">{account.trades}</div></div>
-                   </div>
-                 </div>
-              </div>
-
-              <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-3">
-                <div className="flex items-center justify-between"><div className="flex items-center gap-2"><Bot size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Bot console</h2></div><span className={`flex items-center gap-1.5 rounded-full px-2 py-1 mono text-[9px] uppercase tracking-[.08em] ${botState === 'running' ? 'bg-[#177b69]/10 text-[#177b69]' : 'bg-muted text-muted-foreground'}`} data-testid="status-bot"><StatusDot color={botState === 'running' ? 'bg-[#177b69]' : 'bg-muted-foreground'} />{botState}</span></div>
-                <div className="mt-5 rounded-lg bg-primary p-4 text-primary-foreground">
-                  <div className="flex items-center gap-2 text-[10px] text-primary-foreground/55"><span className="h-1.5 w-1.5 rounded-full bg-accent" /> DECISION LOOP</div>
-                   <div className="mt-2 flex items-end justify-between gap-3"><span className="display text-[22px] font-semibold" data-testid="text-ai-decision">{aiDecision.decision}</span><span className="mono text-[10px] text-accent" data-testid="text-gemini-confidence">{aiDecision.confidence}% conf.</span></div>
-                   <div className="mt-4 h-1 rounded-full bg-primary-foreground/10"><div className="h-1 rounded-full bg-accent transition-all" style={{ width: `${aiDecision.confidence}%` }} /></div>
-                   <div className="mt-2 flex justify-between gap-3 mono text-[9px] text-primary-foreground/45"><span>GEMINI AI · {symbolResults.length ? `${symbolResults.length} PAIRS` : 'MULTI-PAIR'} · M15</span><span>{smcSnapshot?.latestPrice ? `${smcSnapshot?.symbol ?? ''} ${smcSnapshot.latestPrice.toFixed(5)}` : 'waiting for live scan'}</span></div>
-                </div>
-                  <div className="mt-4 rounded-lg border border-border bg-background/45 p-3" data-testid="panel-ai-reasoning">
-                    <div className="mono text-[9px] uppercase tracking-[.12em] text-muted-foreground">Trade reasons</div>
-                     <p className="mt-1.5 text-[11px] leading-5 text-foreground/80">{aiDecision.reasoning}</p>
-                     <div className="mt-2 border-t border-border/70 pt-2 mono text-[9px] text-muted-foreground">Live {smcSnapshot?.symbol ?? ''} price: {smcSnapshot?.latestPrice ? smcSnapshot.latestPrice.toFixed(5) : '—'} · {smcSnapshot?.dataSource ?? 'Awaiting live market data'}</div>
-                  </div>
-                  <div className={`mt-3 flex items-start gap-2 rounded-lg px-3 py-2.5 text-[10px] ${riskDecision.approved ? 'bg-[#177b69]/7 text-[#177b69]' : 'bg-[#c84e3d]/7 text-[#c84e3d]'}`} data-testid="status-risk-engine">
-                    <ShieldCheck size={14} className="mt-0.5 shrink-0" />
-                    <span><strong>{riskDecision.approved ? 'Risk Engine approved' : 'Risk Engine: NO TRADE'}</strong><br />{riskDecision.reasons[0]}</span>
-                  </div>
-                  <div className="mt-4 space-y-3">
-                   {[['Strategy', 'SMC v2.4 + Gemini'], ['Risk per trade', '$5.00 exactly'], ['Max open positions', '1 per pair · 6 total'], ['Daily loss limit', '$20.00'], ['Minimum RR', '1:2']].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-border/60 pb-2.5 text-[11px] last:border-0 last:pb-0"><span className="text-muted-foreground">{label}</span><span className="mono text-[10px] font-medium">{value}</span></div>)}
-                </div>
-                 <div className="mt-5 flex items-center justify-between rounded-lg border border-border bg-background/45 px-3 py-2.5" data-testid="status-smc-engine">
-                   <div className="flex items-center gap-2">
-                     <span className={`h-2 w-2 rounded-full ${smcState === 'running' ? 'bg-[#177b69] pulse-dot' : 'bg-muted-foreground'}`} />
-                     <div>
-                       <div className="text-[11px] font-semibold">M15 SMC engine</div>
-                        <div className="mt-0.5 text-[9px] text-muted-foreground">analysis-only · Live multi-pair data</div>
-                     </div>
-                   </div>
-                   <button type="button" onClick={toggleSmc} data-testid="button-toggle-smc" className={`rounded-md px-2.5 py-1.5 mono text-[9px] font-semibold uppercase tracking-[.08em] transition ${smcState === 'running' ? 'bg-[#177b69]/10 text-[#177b69] hover:bg-[#177b69]/15' : 'bg-muted text-muted-foreground hover:text-foreground'}`}>
-                     {smcState === 'running' ? 'On' : 'Off'}
-                   </button>
-                 </div>
-                 <div className="mt-5 flex gap-2">
-                  <button type="button" onClick={toggleBot} data-testid="button-toggle-bot" className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2.5 text-[11px] font-semibold text-primary-foreground transition hover:opacity-90 active:scale-[.98]">{botState === 'running' ? <Pause size={14} /> : <Play size={14} />}{botState === 'running' ? 'Pause bot' : 'Resume bot'}</button>
-                   <button type="button" onClick={() => void runAiDecision()} disabled={isAnalyzing} data-testid="button-run-ai" className="flex items-center justify-center gap-2 rounded-lg border border-border px-3 py-2.5 text-[10px] font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-primary disabled:cursor-wait disabled:opacity-60" aria-label="Run Gemini AI decision"><Sparkles size={14} />{isAnalyzing ? 'Analyzing…' : 'Run AI'}</button>
-                </div>
-                 <div className="mt-3 flex items-center justify-between mono text-[9px] text-muted-foreground">
-                   <span>Auto scan {botState === 'running' ? 'every 15 min' : 'paused'}</span>
-                   <span>{scheduler?.nextRunAt ? `next ${formatDateTime(scheduler.nextRunAt)} UTC` : 'UTC candle close'}</span>
-                 </div>
               </div>
             </section>
+          </div>
 
-            <section className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(300px,.55fr)]">
-              <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-4">
-                 <div className="flex items-center justify-between"><div><div className="flex items-center gap-2"><Clock3 size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Trade history</h2></div><p className="mt-1 text-[11px] text-muted-foreground">Persisted paper executions and outcomes</p></div><span className="mono text-[9px] uppercase tracking-[.1em] text-muted-foreground">SQLite ledger</span></div>
-                 <div className="mt-5 grid grid-cols-[68px_1fr_76px_72px] gap-2 border-b border-border pb-2 mono text-[9px] uppercase tracking-[.1em] text-muted-foreground sm:grid-cols-[92px_1fr_82px_82px_82px_96px_72px] sm:gap-3"><span>Date / time</span><span>Instrument / setup</span><span className="hidden sm:block">Entry</span><span className="hidden sm:block">SL</span><span className="hidden sm:block">TP</span><span className="text-right">P/L</span><span className="hidden text-right sm:block">Result</span></div>
-                <div>{trades.length ? trades.map((trade) => <ActivityRow key={trade.id} trade={trade} />) : <div className="flex flex-col items-center justify-center py-10 text-center"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground"><Activity size={17} /></div><div className="mt-3 text-[12px] font-semibold">No activity yet</div><div className="mt-1 text-[10px] text-muted-foreground">Resume the bot when you are ready to run the simulation.</div></div>}</div>
-              </div>
-               <div className="rounded-xl border border-card-border bg-card p-5 shadow-xs sm:p-6 dashboard-in delay-5">
-                 <div className="flex items-center justify-between"><div className="flex items-center gap-2"><WalletCards size={15} className="text-primary" /><h2 className="display text-[17px] font-semibold tracking-[-.025em]">Current position</h2></div><span className={`rounded-full px-2 py-1 mono text-[9px] uppercase tracking-[.08em] ${openTrade ? 'bg-[#177b69]/10 text-[#177b69]' : 'bg-muted text-muted-foreground'}`}>{openTrade ? 'OPEN' : 'FLAT'}</span></div>
-                 {openTrade ? <div className="mt-4 rounded-lg border border-border bg-background/60 p-4">
-                    <div className="flex items-center justify-between"><div><div className="text-[17px] font-semibold">{openTrade.symbol}</div><div className="mt-1 flex items-center gap-2 mono text-[9px] text-muted-foreground"><span className={`rounded px-1.5 py-0.5 ${openTrade.side === 'BUY' ? 'bg-[#177b69]/10 text-[#177b69]' : 'bg-[#c84e3d]/10 text-[#c84e3d]'}`}>{openTrade.side}</span> M15 · Gemini + SMC</div></div><div className="text-right"><div className={`mono text-[15px] font-medium ${(openTrade.unrealizedPnl ?? 0) >= 0 ? 'text-[#177b69]' : 'text-[#c84e3d]'}`}>{formatSignedMoney(openTrade.unrealizedPnl ?? 0)}</div><div className="mt-1 mono text-[9px] text-muted-foreground">{openTrade.currentPrice ? `now ${openTrade.currentPrice.toFixed(5)}` : 'unrealized'}</div></div></div>
-                   <div className="mt-5 grid grid-cols-3 gap-3 border-t border-border pt-3"><div><div className="mono text-[9px] text-muted-foreground">Entry</div><div className="mt-1 mono text-[10px]">{openTrade.entryPrice}</div></div><div><div className="mono text-[9px] text-muted-foreground">Stop</div><div className="mt-1 mono text-[10px]">{openTrade.stopLoss}</div></div><div><div className="mono text-[9px] text-muted-foreground">Target</div><div className="mt-1 mono text-[10px]">{openTrade.takeProfit}</div></div></div>
-                 </div> : <div className="mt-4 flex min-h-[130px] flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 p-4 text-center"><WalletCards size={20} className="text-muted-foreground/60" /><div className="mt-3 text-[12px] font-semibold">No active paper trade</div><div className="mt-1 text-[10px] leading-4 text-muted-foreground">Gemini proposals are opened only after the Risk Engine approves them.</div></div>}
-                 <div className={`mt-4 flex items-center gap-2 rounded-lg px-3 py-2.5 text-[10px] ${openTrade ? 'bg-[#177b69]/7 text-[#177b69]' : 'bg-muted text-muted-foreground'}`}><ShieldCheck size={14} /><span>{openTrade ? 'Within risk limits · $5.00 at risk' : 'Flat · ready for one approved trade'}</span></div>
-                 <button type="button" onClick={() => setNotice(openTrade ? 'Position management is simulation-only' : 'No open paper trade')} data-testid="button-position-details" className="mt-4 flex w-full items-center justify-center gap-1 rounded-lg border border-border py-2.5 text-[10px] font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground">Position details <ArrowUpRight size={13} /></button>
-              </div>
-            </section>
+          {/* Trade log */}
+          <section className="mt-6 border border-term-line bg-term-panel p-5" data-testid="panel-trade-log">
+            <div className="flex items-center justify-between">
+              <div className="term-mono text-[13px] font-medium text-term-bright">TRADE_LOG//</div>
+              <span className="term-mono text-[10px] text-term-dim">SQLITE_LEDGER</span>
+            </div>
+            <div className="mt-4">
+              {trades.length ? trades.slice(0, 8).map((trade) => <LogRow key={trade.id} trade={trade} />) : (
+                <div className="term-mono flex min-h-[90px] items-center justify-center text-[11px] text-term-dim">NO_HISTORY</div>
+              )}
+            </div>
+          </section>
 
-            <section className="mt-5 flex flex-col gap-4 rounded-xl border border-border bg-card p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between sm:p-5 dashboard-in delay-5">
-              <div className="flex items-start gap-3"><div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><SlidersHorizontal size={15} /></div><div><div className="text-[12px] font-semibold">Paper account controls</div><div className="mt-1 text-[10px] text-muted-foreground" data-testid="status-notice">{notice}</div></div></div>
-              <div className="flex gap-2 sm:shrink-0"><button type="button" onClick={() => setNotice('Settings are local to this sandbox')} data-testid="button-risk-settings" className="flex items-center gap-2 rounded-lg border border-border px-3 py-2.5 text-[10px] font-semibold transition hover:border-primary/40 hover:text-primary"><SlidersHorizontal size={13} /> Risk settings</button><button type="button" onClick={() => setShowReset(true)} data-testid="button-reset-account" className="flex items-center gap-2 rounded-lg border border-[#c84e3d]/25 px-3 py-2.5 text-[10px] font-semibold text-[#c84e3d] transition hover:bg-[#c84e3d]/7"><RotateCcw size={13} /> Reset account</button></div>
-            </section>
+          <div className="term-mono mt-6 flex items-center justify-between text-[10px] text-term-dim">
+            <span>BAL={formatMoney(account.balance)} · SANDBOX_ISOLATED · NO_BROKER_CREDS</span>
+            <button type="button" onClick={() => setShowReset(true)} data-testid="button-reset-account" className="flex items-center gap-1.5 text-term-amber hover:text-term-amber/80">
+              <RotateCcw size={11} /> RESET
+            </button>
           </div>
         </main>
       </div>
 
-      {showReset && <div className="fixed inset-0 z-40 flex items-center justify-center bg-primary/35 p-5 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="reset-title" data-testid="dialog-reset-account">
-        <div className="w-full max-w-[390px] rounded-2xl border border-border bg-card p-6 shadow-xl dashboard-in">
-          <div className="flex items-start justify-between"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#c84e3d]/10 text-[#c84e3d]"><RotateCcw size={18} /></div><button type="button" onClick={() => setShowReset(false)} data-testid="button-close-reset" className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground"><X size={16} /></button></div>
-          <h2 id="reset-title" className="display mt-5 text-[21px] font-semibold tracking-[-.035em]">Reset paper account?</h2>
-          <p className="mt-2 text-[12px] leading-5 text-muted-foreground">This clears the local simulation history and returns the account to its original <span className="mono text-foreground">$1,000.00</span> virtual balance. No broker or live account is affected.</p>
-          <div className="mt-5 flex gap-2"><button type="button" onClick={() => setShowReset(false)} data-testid="button-cancel-reset" className="flex-1 rounded-lg border border-border py-2.5 text-[11px] font-semibold transition hover:bg-muted">Keep account</button><button type="button" onClick={resetAccount} data-testid="button-confirm-reset" className="flex-1 rounded-lg bg-[#c84e3d] py-2.5 text-[11px] font-semibold text-white transition hover:opacity-90">Reset simulation</button></div>
+      {showReset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-sm border border-term-bright bg-term-panel p-5">
+            <div className="term-mono text-[14px] font-medium text-term-bright">RESET_ACCOUNT?</div>
+            <p className="term-mono mt-2 text-[11px] leading-5 text-term-dim">&gt; Balance resets to $1,000. Trade history is NOT deleted.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setShowReset(false)} className="term-mono px-4 py-2 text-[11px] text-term-dim hover:text-term-fg">CANCEL</button>
+              <button type="button" onClick={() => void resetAccount()} data-testid="button-confirm-reset" className="term-mono border border-term-amber px-4 py-2 text-[11px] font-medium text-term-amber hover:bg-term-amber/10">CONFIRM</button>
+            </div>
+          </div>
         </div>
-      </div>}
+      )}
     </div>
   );
 }
