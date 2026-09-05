@@ -395,7 +395,7 @@ export default function Dashboard() {
 
   const biasDirection = smcSnapshot?.multiTimeframe?.bias ?? smcSnapshot?.multiTimeframe?.h4?.direction;
   const timeframesAligned = smcSnapshot?.multiTimeframe?.aligned;
-  const providerLabel = aiDecision.aiProvider === 'OpenRouter' ? 'DEEPSEEK-R1' : aiDecision.aiProvider === 'Gemini' ? 'GEMINI' : null;
+  const providerLabel = aiDecision.aiProvider === 'OpenRouter' ? 'OPENROUTER' : aiDecision.aiProvider === 'Gemini' ? 'GEMINI' : null;
 
   return (
     <div className="term-bg term-scanlines min-h-[100dvh] text-term-fg">
