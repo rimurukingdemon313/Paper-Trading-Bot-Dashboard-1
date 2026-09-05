@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Sora:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Share+Tech+Mono&display=swap');
 @import 'tailwindcss';
 @import 'tw-animate-css';
 @plugin "@tailwindcss/typography";
@@ -188,3 +188,76 @@
   z-index: 50;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
 }
+
+/* Trading-desk dashboard redesign: scoped classes so the rest of the site's
+   .mono/.display (DM Mono/Space Grotesk) are untouched. */
+.radar-mono { font-family: 'IBM Plex Mono', var(--app-font-mono), monospace; }
+.font-display { font-family: 'Sora', var(--app-font-sans), sans-serif; }
+.radar-bg { background-color: #0F0E0C; }
+
+/* Hacker/terminal theme: monochrome green-on-black, scoped to its own
+   classes so it never collides with other pages' .mono/.display fonts. */
+/* DSEG7: a real seven-segment digital-clock/LCD typeface. Not on Google
+   Fonts, so it's self-hosted via the Fontsource jsDelivr CDN. It only
+   renders digits and a few symbols (:-_) clearly, so it's used just for
+   prices/numbers, not labels/words. */
+@font-face {
+  font-family: 'DSEG7 Classic';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(https://cdn.jsdelivr.net/fontsource/fonts/dseg7-classic@latest/latin-400-normal.woff2) format('woff2'),
+       url(https://cdn.jsdelivr.net/fontsource/fonts/dseg7-classic@latest/latin-400-normal.woff) format('woff');
+}
+.term-digits { font-family: 'DSEG7 Classic', 'Share Tech Mono', monospace; letter-spacing: 0.02em; }
+
+.term-mono { font-family: 'Share Tech Mono', 'IBM Plex Mono', monospace; }
+.term-bg { background-color: #060A06; }
+.text-term-fg { color: #B6F5C4; }
+.text-term-bright { color: #00FF41; }
+.text-term-amber { color: #E8B339; }
+.text-term-dim { color: #4E7A57; }
+.bg-term-panel { background-color: #0A120A; }
+.border-term-line { border-color: #1C3A22; }
+.bg-term-line { background-color: #1C3A22; }
+.border-term-bright { border-color: #00FF41; }
+.border-term-amber { border-color: #E8B339; }
+
+.term-scanlines {
+  position: relative;
+}
+.term-scanlines::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 40;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 255, 65, 0.035) 0px,
+    rgba(0, 255, 65, 0.035) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+.term-scanlines::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 41;
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.35) 100%);
+}
+
+@keyframes term-blink-kf {
+  0%, 45% { opacity: 1; }
+  50%, 95% { opacity: 0.15; }
+  100% { opacity: 1; }
+}
+.term-blink { animation: term-blink-kf 1.6s steps(1) infinite; border-radius: 9999px; }
+
+@keyframes term-cursor-kf {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+.term-cursor { animation: term-cursor-kf 1s steps(1) infinite; }
