@@ -254,7 +254,7 @@ function decisionFromParsed(
 }
 
 const OPENROUTER_MODEL = "deepseek/deepseek-r1:free";
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-3.6-flash";
 
 async function askOpenRouter(
   symbol: TradedSymbol,
