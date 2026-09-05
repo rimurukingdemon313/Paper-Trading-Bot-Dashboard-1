@@ -253,7 +253,11 @@ function decisionFromParsed(
   };
 }
 
-const OPENROUTER_MODEL = "deepseek/deepseek-r1:free";
+// openrouter/free auto-routes to whichever free model is currently
+// available (DeepSeek, Llama, Qwen, etc). More stable than pinning to one
+// specific free model like deepseek/deepseek-r1:free, which OpenRouter
+// intermittently takes offline under high demand.
+const OPENROUTER_MODEL = "openrouter/free";
 const GEMINI_MODEL = "gemini-3.6-flash";
 
 async function askOpenRouter(
