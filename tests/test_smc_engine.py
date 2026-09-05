@@ -74,7 +74,7 @@ class SMCAnalyzerTests(unittest.TestCase):
         self.assertEqual(first["timeframe"], "M15")
         self.assertEqual(first["latest_candle"]["close"], 113.2)
 
-    def test_rejects_non_m15_candles(self) -> None:
+    def test_accepts_supported_non_m15_timeframes(self) -> None:
         row = {
             "timestamp": "2026-01-02T09:00:00+00:00",
             "timeframe": "H1",
@@ -83,8 +83,39 @@ class SMCAnalyzerTests(unittest.TestCase):
             "low": 99,
             "close": 100.5,
         }
+        candle = Candle.from_mapping(row)
+        self.assertEqual(candle.timeframe, "H1")
+
+    def test_rejects_unsupported_timeframe(self) -> None:
+        row = {
+            "timestamp": "2026-01-02T09:00:00+00:00",
+            "timeframe": "D1",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100.5,
+        }
         with self.assertRaises(ValueError):
             Candle.from_mapping(row)
+
+    def test_rejects_mixed_timeframes_in_one_analysis(self) -> None:
+        candles = load_fixture()[:6]
+        rows = [
+            {
+                "timestamp": candle.timestamp.isoformat(),
+                "timeframe": candle.timeframe,
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+            }
+            for candle in candles
+        ]
+        h1_row = dict(rows[-1])
+        h1_row["timeframe"] = "H1"
+        rows.append(h1_row)
+        with self.assertRaises(ValueError):
+            SMCAnalyzer().analyze(Candle.from_mapping(row) for row in rows)
 
 
 if __name__ == "__main__":
