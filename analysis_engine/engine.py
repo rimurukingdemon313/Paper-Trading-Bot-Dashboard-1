@@ -35,8 +35,11 @@ class SMCAnalyzer:
         displacement_lookback: int = 5,
     ) -> None:
         self.timeframe = timeframe.upper()
-        if self.timeframe != "M15":
-            raise ValueError("SMCAnalyzer execution timeframe must be M15")
+        supported_timeframes = ("M15", "H1", "H4")
+        if self.timeframe not in supported_timeframes:
+            raise ValueError(
+                f"SMCAnalyzer execution timeframe must be one of {supported_timeframes}"
+            )
         self.swing_window = swing_window
         self.equal_level_tolerance = equal_level_tolerance
         self.displacement_lookback = displacement_lookback
@@ -109,9 +112,10 @@ class SMCAnalyzer:
     @staticmethod
     def _validate_sequence(candles: Sequence[Candle]) -> None:
         if len(candles) < 7:
-            raise ValueError("at least 7 M15 candles are required for SMC analysis")
-        if any(candle.timeframe != "M15" for candle in candles):
-            raise ValueError("all candles must use the M15 timeframe")
+            raise ValueError("at least 7 candles are required for SMC analysis")
+        timeframes = {candle.timeframe for candle in candles}
+        if len(timeframes) > 1:
+            raise ValueError(f"all candles must use the same timeframe, got {sorted(timeframes)}")
         if any(left.timestamp >= right.timestamp for left, right in zip(candles, candles[1:])):
             raise ValueError("candles must be strictly chronological")
 
